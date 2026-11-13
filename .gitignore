@@ -1,6 +1,9 @@
 # Any level, not just the root: running cargo inside a member directory creates a
 # nested one (updater/target), and `/target` would not match it.
 target/
+.cargo-local/
+.rustup-local/
+rustup-init.exe
 
 # ── never commit signing material ────────────────────────────────────────────
 #

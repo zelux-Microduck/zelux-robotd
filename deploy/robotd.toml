@@ -30,6 +30,8 @@ port = "/dev/ttyS2"
 # mode: motion stays inhibited instead of pretending the robot is upright.
 # [bus.imu]
 # source = "embedded"
+# socket = "/run/zelux/robotd-imu.sock"
+# max_age_ms = 100
 
 # Feetech builds only. p_scale maps the XL330-scale gains used everywhere else in this file
 # onto the servo's one-byte P; directions is +1/-1 per joint (left leg, neck/head/mouth, right

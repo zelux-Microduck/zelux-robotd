@@ -108,6 +108,11 @@ pub const REGISTRY: &[Entry] = &[
         "Servo wire protocol — dynamixel2 (XL330) or feetech-sts (HD-1910 build)",
     ),
     entry(
+        "bus.imu",
+        Kind::Record("source = \"embedded\"\nsocket = \"/run/zelux/robotd-imu.sock\"\nmax_age_ms = 100"),
+        "IMU source selected independently from the servo bus — embedded, unavailable, or ipc",
+    ),
+    entry(
         "bus.feetech",
         Kind::Record("p_scale = 0.16\ndirections = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]"),
         "Feetech build only: gain scale and per-joint direction, measured on the bench — edit robotd.toml by hand",

@@ -1783,6 +1783,26 @@ async fn control_loop<T: RobotIo>(
         robotd_params::ImuSourceKind::Unavailable => {
             duck_control::SelectedImuSource::unavailable()
         }
+        robotd_params::ImuSourceKind::Ipc => {
+            #[cfg(target_os = "linux")]
+            {
+                match duck_control::IpcImuSource::bind(
+                    &params.bus.imu.socket,
+                    Duration::from_millis(params.bus.imu.max_age_ms),
+                ) {
+                    Ok(source) => duck_control::SelectedImuSource::ipc(source),
+                    Err(error) => {
+                        tracing::error!(%error, "cannot open IMU IPC; motion remains inhibited");
+                        duck_control::SelectedImuSource::unavailable()
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                tracing::warn!("IMU IPC is available only on Linux; motion remains inhibited");
+                duck_control::SelectedImuSource::unavailable()
+            }
+        }
     };
     let io = duck_control::SplitImuIo::new(io, imu_source);
     let mut safety = Safety::new(

@@ -1802,6 +1802,10 @@ pub struct Bus {
 #[serde(deny_unknown_fields, default)]
 pub struct BusImu {
     pub source: ImuSourceKind,
+    /// Datagram socket robotd binds when `source = "ipc"`.
+    pub socket: String,
+    /// A producer silent for longer than this makes the source not-ready.
+    pub max_age_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1812,12 +1816,16 @@ pub enum ImuSourceKind {
     Embedded,
     /// Bring-up mode: publish not-ready and never substitute a fake upright measurement.
     Unavailable,
+    /// A driver process publishes `zelux.robotd-imu/v1` datagrams.
+    Ipc,
 }
 
 impl Default for BusImu {
     fn default() -> Self {
         Self {
             source: ImuSourceKind::default(),
+            socket: "/run/zelux/robotd-imu.sock".into(),
+            max_age_ms: 100,
         }
     }
 }

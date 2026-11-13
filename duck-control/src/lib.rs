@@ -26,6 +26,8 @@ pub use imu_source::{
     EmbeddedImuSource, ImuSample, ImuSource, SelectedImuSource, SplitImuIo,
     UnavailableImuSource,
 };
+#[cfg(unix)]
+pub use imu_source::IpcImuSource;
 pub use io::{FakeIo, IoError, JointTargets, RobotIo, Sensors, SlowSensors};
 pub use model::{
     BATTERY_EMPTY_V, BATTERY_FULL_V, DEFAULT_POSITION, JOINT_IDS, JOINT_NAMES, NUM_JOINTS,

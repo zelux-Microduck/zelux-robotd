@@ -6,7 +6,15 @@
 //! those transports.
 
 use crate::imu::ImuData;
-use crate::io::{ImuStale, JointTargets, Result, RobotIo, Sensors, SlowSensors};
+use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
+#[cfg(unix)]
+use serde::Deserialize;
+#[cfg(unix)]
+use std::os::unix::net::UnixDatagram;
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 /// One IMU measurement plus the liveness information used by safety and health reporting.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,6 +80,8 @@ impl ImuSource for UnavailableImuSource {
 pub enum SelectedImuSource {
     Embedded(EmbeddedImuSource),
     Unavailable(UnavailableImuSource),
+    #[cfg(unix)]
+    Ipc(IpcImuSource),
 }
 
 impl SelectedImuSource {
@@ -82,6 +92,11 @@ impl SelectedImuSource {
     pub fn unavailable() -> Self {
         Self::Unavailable(UnavailableImuSource)
     }
+
+    #[cfg(unix)]
+    pub fn ipc(source: IpcImuSource) -> Self {
+        Self::Ipc(source)
+    }
 }
 
 impl ImuSource for SelectedImuSource {
@@ -89,6 +104,8 @@ impl ImuSource for SelectedImuSource {
         match self {
             Self::Embedded(source) => source.id(),
             Self::Unavailable(source) => source.id(),
+            #[cfg(unix)]
+            Self::Ipc(source) => source.id(),
         }
     }
 
@@ -96,7 +113,125 @@ impl ImuSource for SelectedImuSource {
         match self {
             Self::Embedded(source) => source.sample(embedded),
             Self::Unavailable(source) => source.sample(embedded),
+            #[cfg(unix)]
+            Self::Ipc(source) => source.sample(embedded),
         }
+    }
+}
+
+/// Wire representation accepted from an external IMU driver process.
+///
+/// It is intentionally the measurement subset of `zelux.robotd-imu/v1`: driver identity and
+/// publication metadata belong to the service boundary, while the 50 Hz loop only needs these
+/// values. Unknown fields are accepted so additive protocol upgrades do not stop motion.
+#[cfg(unix)]
+#[derive(Deserialize)]
+struct IpcPacket {
+    schema: String,
+    sequence: u64,
+    gyro_rad_s: [f64; 3],
+    gravity: [f64; 3],
+    quaternion_wxyz: [f64; 4],
+    ready: bool,
+}
+
+/// Non-blocking Unix datagram input for an IMU owned by another process.
+///
+/// Every control tick drains the socket and keeps only the newest sequence. Missing packets hold
+/// the last numeric value for observability, but `ready` becomes false after `max_age`; safety can
+/// therefore never mistake a dead producer for a stationary upright robot.
+#[cfg(unix)]
+pub struct IpcImuSource {
+    socket: UnixDatagram,
+    max_age: Duration,
+    last: ImuSample,
+    last_sequence: Option<u64>,
+    last_received: Option<Instant>,
+}
+
+#[cfg(unix)]
+impl IpcImuSource {
+    pub fn bind(path: impl AsRef<Path>, max_age: Duration) -> Result<Self> {
+        let path = path.as_ref();
+        let socket = UnixDatagram::bind(path).map_err(|source| IoError::Port {
+            path: path.display().to_string(),
+            source,
+        })?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|source| IoError::Port {
+                path: path.display().to_string(),
+                source,
+            })?;
+        Ok(Self {
+            socket,
+            max_age,
+            last: ImuSample::default(),
+            last_sequence: None,
+            last_received: None,
+        })
+    }
+
+    fn accept(&mut self, packet: IpcPacket) {
+        if packet.schema != "zelux.robotd-imu/v1"
+            || self
+                .last_sequence
+                .is_some_and(|sequence| packet.sequence <= sequence)
+        {
+            return;
+        }
+        self.last = ImuSample {
+            data: ImuData {
+                gyro: packet.gyro_rad_s,
+                gravity: packet.gravity,
+                quat: packet.quaternion_wxyz,
+            },
+            ready: packet.ready,
+            stale: ImuStale {
+                total: self.last.stale.total,
+                run: 0,
+            },
+        };
+        self.last_sequence = Some(packet.sequence);
+        self.last_received = Some(Instant::now());
+    }
+}
+
+#[cfg(unix)]
+impl ImuSource for IpcImuSource {
+    fn id(&self) -> &'static str {
+        "ipc"
+    }
+
+    fn sample(&mut self, _embedded: Option<ImuSample>) -> Result<ImuSample> {
+        let mut fresh = false;
+        loop {
+            let mut bytes = [0_u8; 2048];
+            match self.socket.recv(&mut bytes) {
+                Ok(len) => match serde_json::from_slice::<IpcPacket>(&bytes[..len]) {
+                    Ok(packet) => {
+                        let before = self.last_sequence;
+                        self.accept(packet);
+                        fresh |= self.last_sequence != before;
+                    }
+                    Err(error) => tracing::warn!(%error, "discarding malformed IMU datagram"),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(IoError::Bus(format!("IMU IPC receive: {error}"))),
+            }
+        }
+
+        if !fresh {
+            self.last.stale.total = self.last.stale.total.saturating_add(1);
+            self.last.stale.run = self.last.stale.run.saturating_add(1);
+        }
+        if self
+            .last_received
+            .is_none_or(|received| received.elapsed() > self.max_age)
+        {
+            self.last.ready = false;
+        }
+        Ok(self.last)
     }
 }
 
@@ -239,5 +374,34 @@ mod tests {
         let _ = io.read().unwrap();
 
         assert!(!io.imu_ready());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ipc_source_accepts_new_samples_and_expires_them() {
+        use std::os::unix::net::UnixDatagram;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("robotd-imu-{}-{suffix}.sock", std::process::id()));
+        let mut source = IpcImuSource::bind(&path, Duration::from_millis(20)).unwrap();
+        let sender = UnixDatagram::unbound().unwrap();
+        sender
+            .send_to(
+                br#"{"schema":"zelux.robotd-imu/v1","sequence":4,"gyro_rad_s":[1.0,2.0,3.0],"gravity":[0.0,0.0,-1.0],"quaternion_wxyz":[1.0,0.0,0.0,0.0],"ready":true}"#,
+                &path,
+            )
+            .unwrap();
+
+        let sample = source.sample(None).unwrap();
+        assert_eq!(sample.data.gyro, [1.0, 2.0, 3.0]);
+        assert!(sample.ready);
+
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!source.sample(None).unwrap().ready);
+        std::fs::remove_file(path).unwrap();
     }
 }
