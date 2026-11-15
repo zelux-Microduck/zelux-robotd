@@ -19,7 +19,7 @@ use crate::model::NUM_JOINTS;
 /// The wire the servos speak.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum BusProtocol {
-    /// Dynamixel Protocol 2.0, XL330 servos, the `imu_to_dxl` board at ID 200.
+    /// Dynamixel Protocol 2.0, XL330 servos, and optionally the legacy `imu_to_dxl` board at ID 200.
     #[default]
     Dynamixel2,
     /// Feetech STS/SMS framing, HD-1910 servos.
@@ -56,8 +56,20 @@ macro_rules! each {
 
 impl AnyBus {
     pub fn open(port: &str, protocol: &BusProtocol) -> Result<Self> {
+        Self::open_with_embedded_imu(port, protocol, true)
+    }
+
+    /// Open a servo backend, including the legacy Dynamixel IMU only when selected.
+    pub fn open_with_embedded_imu(
+        port: &str,
+        protocol: &BusProtocol,
+        embedded_imu: bool,
+    ) -> Result<Self> {
         Ok(match protocol {
-            BusProtocol::Dynamixel2 => Self::Dynamixel(DynamixelIo::open(port)?),
+            BusProtocol::Dynamixel2 => Self::Dynamixel(DynamixelIo::open_with_embedded_imu(
+                port,
+                embedded_imu,
+            )?),
             BusProtocol::FeetechSts(config) => {
                 Self::Feetech(FeetechIo::open(port, config.clone())?)
             }

@@ -3,10 +3,10 @@
 //! Everything between [`RobotIo::read`] and [`RobotIo::write`] is pure computation over
 //! plain data, which is what makes the loop testable without a robot.
 //!
-//! [`Sensors`] carries joints *and* IMU together because that is what the hardware does:
-//! the IMU board sits on the Dynamixel bus and is fetched in the same transaction as the
-//! servos. A trait that split them would invent a distinction the bus does not have, and
-//! would double the bus traffic to honour it.
+//! [`Sensors`] carries joints *and* IMU together to keep one control-loop sample shape. A bus
+//! backend fills orientation only when the legacy embedded source is selected; the source
+//! adapter can replace those fields with an independent process's sample without changing the
+//! motor transaction or doubling bus traffic.
 
 use crate::imu::ImuData;
 use crate::model::NUM_JOINTS;
@@ -111,7 +111,7 @@ pub struct ImuStale {
 }
 
 pub trait RobotIo {
-    /// One transaction: joints and IMU together.
+    /// One transaction for the motor backend, optionally including its legacy embedded IMU.
     fn read(&mut self) -> Result<Sensors>;
     fn write(&mut self, targets: &JointTargets) -> Result<()>;
 

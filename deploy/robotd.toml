@@ -16,20 +16,21 @@
 # is far easier to diagnose remotely than a daemon that will not run.
 
 [bus]
-# Serial port the 15 servos and the imu_to_dxl board share. /dev/ttyS2 is the Radxa
-# Zero 3W's wiring; a board wired differently can also be overridden per-invocation with
-# `robotd --port`, which is the dev escape hatch rather than the thing to edit here.
+# Serial port for the 15 servos. The legacy imu_to_dxl board joins this bus only when
+# `[bus.imu].source = "embedded"`; the independent IPC source does not require it.
+# /dev/ttyS2 is the Radxa Zero 3W's wiring; a board wired differently can also be overridden
+# per-invocation with `robotd --port`, which is the dev escape hatch rather than the thing to edit here.
 port = "/dev/ttyS2"
 
 # The wire the servos speak. "dynamixel2" is the robot as Pollen builds it. A build with
 # Feetech STS-protocol servos (HD-1910) sets "feetech-sts" and fills in [bus.feetech] below.
 # protocol = "dynamixel2"
 
-# IMU selection is independent from the servo protocol. "embedded" consumes the sample returned
-# by the motor backend (the original XL330 + imu_to_dxl layout). "unavailable" is a safe bring-up
-# mode: motion stays inhibited instead of pretending the robot is upright.
+# IMU selection is independent from the servo protocol. "ipc" uses the independently selected
+# device driver; if no fresh data arrives, motion is inhibited. "embedded" forces the original
+# XL330 + imu_to_dxl layout; "unavailable" is safe bring-up mode.
 # [bus.imu]
-# source = "embedded"
+# source = "ipc"
 # socket = "/run/zelux/robotd-imu.sock"
 # max_age_ms = 100
 

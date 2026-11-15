@@ -1052,7 +1052,8 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some(mut io) = open_bus(&params.bus.port, &protocol, 0) else {
+    // Initialization only positions motors; it must not require any IMU device on the servo bus.
+    let Some(mut io) = open_bus(&params.bus.port, &protocol, false, 0) else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1103,7 +1104,12 @@ fn spawn_control_thread(
     let fake = args.fake;
     let sim = args.sim.clone();
     let port = params.bus.port.clone();
-    let params = params.clone();
+    let mut params = params.clone();
+    if fake || sim.is_some() {
+        // The fake and MuJoCo backends provide synthetic IMU readings through RobotIo; never
+        // bind the physical robot's local IMU socket for a simulated body.
+        params.bus.imu.source = params::ImuSourceKind::Embedded;
+    }
     // So a reload can re-read `[policy]` without a restart. The path rather than the loaded
     // params, because the point is to pick up what has been written since.
     let params_path = args
@@ -1172,8 +1178,9 @@ fn spawn_control_thread(
                     return;
                 }
             };
+            let embedded_imu = params.bus.imu.source == params::ImuSourceKind::Embedded;
             runtime.block_on(async move {
-                if let Some(io) = open_bus_waiting(&port, &protocol, &state).await {
+                if let Some(io) = open_bus_waiting(&port, &protocol, embedded_imu, &state).await {
                     control_loop(io, state, intents, params, params_path, period, poweroff).await;
                 }
             });
@@ -1193,13 +1200,18 @@ type BusIo = FakeIo;
 /// one to abandon the control loop over.
 ///
 /// Returns `None` only if shutdown is requested while waiting.
-async fn open_bus_waiting(port: &str, protocol: &BusProtocol, state: &RobotState) -> Option<BusIo> {
+async fn open_bus_waiting(
+    port: &str,
+    protocol: &BusProtocol,
+    embedded_imu: bool,
+    state: &RobotState,
+) -> Option<BusIo> {
     let mut attempt = 0u32;
 
     while !state.shutdown.load(Ordering::Relaxed) {
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
-        if let Some(io) = open_bus(port, protocol, attempt) {
+        if let Some(io) = open_bus(port, protocol, embedded_imu, attempt) {
             state.startup_bus_failures.store(0, Ordering::Relaxed);
             return Some(io);
         }
@@ -1219,11 +1231,16 @@ async fn open_bus_waiting(port: &str, protocol: &BusProtocol, state: &RobotState
 
 /// Open and verify the bus, or explain why not.
 #[cfg(target_os = "linux")]
-fn open_bus(port: &str, protocol: &BusProtocol, attempt: u32) -> Option<BusIo> {
+fn open_bus(
+    port: &str,
+    protocol: &BusProtocol,
+    embedded_imu: bool,
+    attempt: u32,
+) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
 
-    let mut io = match BusIo::open(port, protocol) {
+    let mut io = match BusIo::open_with_embedded_imu(port, protocol, embedded_imu) {
         Ok(io) => io,
         Err(e) => {
             if loud {
@@ -1331,7 +1348,12 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_bus(_port: &str, _protocol: &BusProtocol, _attempt: u32) -> Option<BusIo> {
+fn open_bus(
+    _port: &str,
+    _protocol: &BusProtocol,
+    _embedded_imu: bool,
+    _attempt: u32,
+) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
 }
@@ -1775,9 +1797,9 @@ async fn control_loop<T: RobotIo>(
         &policy_cfg,
         &slot_errors,
     )));
-    // Keep motor transport and IMU selection behind separate interfaces.  The default source
-    // consumes the IMU sample already read with the Dynamixel transaction, so this is behaviour
-    // preserving while allowing Feetech/I2C/IPC sources to be selected independently.
+    // Keep motor transport and IMU selection behind separate interfaces. IPC is the default and
+    // does not ask the Dynamixel backend to read the legacy IMU ID; `embedded` remains available
+    // for the original combined-bus hardware.
     let imu_source = match params.bus.imu.source {
         robotd_params::ImuSourceKind::Embedded => duck_control::SelectedImuSource::embedded(),
         robotd_params::ImuSourceKind::Unavailable => {
@@ -1799,8 +1821,8 @@ async fn control_loop<T: RobotIo>(
             }
             #[cfg(not(target_os = "linux"))]
             {
-                tracing::warn!("IMU IPC is available only on Linux; motion remains inhibited");
-                duck_control::SelectedImuSource::unavailable()
+                tracing::warn!("IMU IPC is available only on Linux; using the fake embedded source");
+                duck_control::SelectedImuSource::embedded()
             }
         }
     };
@@ -4835,6 +4857,12 @@ mod mapping {
 mod tests {
     use super::*;
 
+    fn fake_params() -> Params {
+        let mut params = Params::default();
+        params.bus.imu.source = params::ImuSourceKind::Embedded;
+        params
+    }
+
     /// A `RobotState` over a real config file, for the two calls that write one.
     fn state_over(text: &str) -> (tempfile::TempDir, Arc<RobotState>) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5892,7 +5920,7 @@ mod tests {
     /// policy and therefore ONNX Runtime, so it is exercised on a board rather than here.
     #[tokio::test(start_paused = true)]
     async fn a_shutdown_request_without_a_sit_cuts_torque_and_powers_off() {
-        let mut params = Params::default();
+        let mut params = fake_params();
         params.policy.enabled = false;
         let s = Arc::new(RobotState::new(
             &params,
@@ -5943,7 +5971,7 @@ mod tests {
     /// is checked here — it must not either.
     #[tokio::test(start_paused = true)]
     async fn a_powered_off_robot_is_not_stood_up_again() {
-        let params = Params::default();
+        let params = fake_params();
         let s = Arc::new(RobotState::new(
             &params,
             std::path::Path::new("/test/robotd.toml"),
@@ -6458,7 +6486,7 @@ mod tests {
     /// load; without it, the runtime probe fails first. Either way the contract is the same.
     #[tokio::test]
     async fn an_unloadable_policy_holds_the_pose_and_reports_why() {
-        let mut params = Params::default();
+        let mut params = fake_params();
         params.policy.walk = Some(PathBuf::from("/nonexistent/definitely-not-a-policy.onnx"));
         params.policy.stand = None;
 
@@ -6533,7 +6561,7 @@ mod tests {
                 enabled: false,
                 ..params::PolicyParams::default()
             },
-            ..Params::default()
+            ..fake_params()
         };
         let s = Arc::new(RobotState::new(
             &params,
@@ -6596,7 +6624,7 @@ mod tests {
                 enabled: false,
                 ..params::PolicyParams::default()
             },
-            ..Params::default()
+            ..fake_params()
         };
         let s = Arc::new(RobotState::new(
             &params,
@@ -6855,6 +6883,7 @@ mod tests {
             open_bus_waiting(
                 "/dev/definitely-not-a-bus",
                 &BusProtocol::default(),
+                false,
                 &waiter_state,
             )
             .await
@@ -7973,7 +8002,7 @@ mod tests {
             Borrowed(io),
             state,
             intents,
-            Params::default(),
+            fake_params(),
             PathBuf::from("/nonexistent/robotd.toml"),
             period,
             noop_poweroff(),

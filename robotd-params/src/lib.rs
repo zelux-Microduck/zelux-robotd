@@ -1785,12 +1785,13 @@ impl Default for SafetyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Bus {
-    /// Serial port the servos and the IMU board share. The Radxa Zero 3W wires them to
-    /// `/dev/ttyS2`.
+    /// Serial port for the servos and, only when `bus.imu.source = "embedded"`, the legacy IMU
+    /// board. The Radxa Zero 3W wires the servo bus to `/dev/ttyS2`.
     pub port: String,
-    /// The wire the servos speak. `dynamixel2` is the robot as Pollen builds it — XL330s and
-    /// the `imu_to_dxl` board. `feetech-sts` is a build with Feetech STS/SMS-protocol servos
-    /// (HD-1910), which also reads `[bus.feetech]`.
+    /// The wire the servos speak. `dynamixel2` is the robot as Pollen builds it — XL330s, with
+    /// the legacy `imu_to_dxl` board included only when `[bus.imu].source = "embedded"`.
+    /// `feetech-sts` is a build with Feetech STS/SMS-protocol servos (HD-1910), which also reads
+    /// `[bus.feetech]`.
     pub protocol: BusProtocol,
     /// Orientation source, selected independently from the servo wire protocol.
     pub imu: BusImu,
@@ -1811,13 +1812,13 @@ pub struct BusImu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImuSourceKind {
-    /// IMU data included in the motor backend's atomic read (the original Microduck layout).
+    /// A driver process publishes `zelux.robotd-imu/v1` datagrams.
     #[default]
+    Ipc,
+    /// IMU data included in the motor backend's atomic read (the original Microduck layout).
     Embedded,
     /// Bring-up mode: publish not-ready and never substitute a fake upright measurement.
     Unavailable,
-    /// A driver process publishes `zelux.robotd-imu/v1` datagrams.
-    Ipc,
 }
 
 impl Default for BusImu {
@@ -2904,8 +2905,18 @@ mod tests {
         let path = write(dir.path(), "[bus]\nport = \"/dev/ttyUSB0\"\n");
         let p = Params::load(&path, true).unwrap();
         assert_eq!(p.bus.port, "/dev/ttyUSB0");
+        assert_eq!(p.bus.imu.source, ImuSourceKind::Ipc);
         assert_eq!(p.control.hz, 50);
         assert_eq!(p.update_gate.stall_periods, 25);
+    }
+
+    #[test]
+    fn imu_source_keeps_explicit_legacy_and_bringup_modes() {
+        let embedded: Params = toml::from_str("[bus.imu]\nsource = \"embedded\"\n").unwrap();
+        let unavailable: Params =
+            toml::from_str("[bus.imu]\nsource = \"unavailable\"\n").unwrap();
+        assert_eq!(embedded.bus.imu.source, ImuSourceKind::Embedded);
+        assert_eq!(unavailable.bus.imu.source, ImuSourceKind::Unavailable);
     }
 
     /// [`QUALITY_LABELS`] is what the registry offers and what the file may contain, and
@@ -3112,6 +3123,7 @@ mod tests {
         let built_in = Params::default();
 
         assert_eq!(from_file.bus.port, built_in.bus.port);
+        assert_eq!(from_file.bus.imu.source, built_in.bus.imu.source);
         assert_eq!(from_file.control.hz, built_in.control.hz);
         assert_eq!(from_file.control.cmd_alpha, built_in.control.cmd_alpha);
         assert_eq!(from_file.control.head_alpha, built_in.control.head_alpha);

@@ -1,8 +1,8 @@
 //! The Dynamixel bus.
 //!
-//! One combined `sync_read` per tick covering the IMU board and all 15 servos, and one
-//! `sync_write` of goal positions. The IMU is listed first so it answers before the servo
-//! burst.
+//! One `sync_read` per tick covering all 15 servos, and one `sync_write` of goal positions.
+//! The legacy embedded IMU may be included in that read when explicitly selected; independent
+//! IMU sources omit its bus ID entirely.
 //!
 //! Battery and thermals are the one thing that does not fit that shape: they live at registers
 //! outside the block the tick fetches, so [`RobotIo::slow_sensors`] is a transaction of its
@@ -104,8 +104,9 @@ pub struct DynamixelIo {
     /// Kept so the port can be reopened at the factory baud rate: `rustypot` owns the serial
     /// handle outright and offers no way to change its speed in place.
     port: String,
-    /// IMU first, then the servos in [`JOINT_IDS`] order — the order blocks come back in.
+    /// The legacy IMU first when enabled, then servos in [`JOINT_IDS`] order.
     ids: Vec<u8>,
+    embedded_imu: bool,
     imu: SflpDecoder,
     /// Blocks identical to their predecessor. The read succeeded but the board handed back
     /// the same sample, which means the policy is being fed dead orientation data — a
@@ -115,16 +116,20 @@ pub struct DynamixelIo {
 
 impl DynamixelIo {
     pub fn open(port: &str) -> Result<Self> {
+        Self::open_with_embedded_imu(port, true)
+    }
+
+    /// Open the motor bus, optionally including the legacy IMU board at ID 200.
+    pub fn open_with_embedded_imu(port: &str, embedded_imu: bool) -> Result<Self> {
         let controller = open_controller(port, BAUD_RATE)?;
 
-        let mut ids = Vec::with_capacity(NUM_JOINTS + 1);
-        ids.push(IMU_DXL_ID);
-        ids.extend_from_slice(&JOINT_IDS);
+        let ids = dynamixel_read_ids(embedded_imu);
 
         Ok(Self {
             controller,
             port: port.to_owned(),
             ids,
+            embedded_imu,
             imu: SflpDecoder::default(),
             stale_imu: StaleImuTracker::default(),
         })
@@ -427,7 +432,7 @@ impl RobotIo for DynamixelIo {
         let blocks = self
             .controller
             .sync_read_raw_data(&self.ids, READ_ADDR, READ_LEN)
-            .map_err(|e| IoError::Bus(format!("combined imu+motor sync_read: {e}")))?;
+            .map_err(|e| IoError::Bus(format!("motor sync_read: {e}")))?;
 
         if blocks.len() != self.ids.len() {
             return Err(IoError::ShortRead {
@@ -439,8 +444,15 @@ impl RobotIo for DynamixelIo {
 
         let mut sensors = Sensors::default();
 
-        // Slot 0 is the IMU board.
-        if blocks[0].len() == IMU_BLOCK_LEN {
+        let joints = if self.embedded_imu {
+            // Slot 0 is the legacy IMU board.
+            if blocks[0].len() != IMU_BLOCK_LEN {
+                return Err(IoError::ShortRead {
+                    what: "imu block",
+                    expected: IMU_BLOCK_LEN,
+                    got: blocks[0].len(),
+                });
+            }
             let mut raw = [0u8; IMU_BLOCK_LEN];
             raw.copy_from_slice(&blocks[0]);
             // Say so, or the counters are numbers nobody ever reads — but only once the run
@@ -456,15 +468,12 @@ impl RobotIo for DynamixelIo {
                 );
             }
             sensors.imu = self.imu.decode(&raw);
+            &blocks[1..]
         } else {
-            return Err(IoError::ShortRead {
-                what: "imu block",
-                expected: IMU_BLOCK_LEN,
-                got: blocks[0].len(),
-            });
+            &blocks[..]
         }
 
-        for (joint, block) in blocks[1..].iter().enumerate() {
+        for (joint, block) in joints.iter().enumerate() {
             if block.len() != READ_LEN as usize {
                 return Err(IoError::ShortRead {
                     what: "motor block",
@@ -585,17 +594,39 @@ impl RobotIo for DynamixelIo {
     }
 
     fn imu_stale(&self) -> ImuStale {
-        self.stale_imu.stale
+        if self.embedded_imu {
+            self.stale_imu.stale
+        } else {
+            ImuStale::default()
+        }
     }
 
     fn imu_ready(&self) -> bool {
-        self.imu.ready()
+        self.embedded_imu && self.imu.ready()
     }
+}
+
+fn dynamixel_read_ids(embedded_imu: bool) -> Vec<u8> {
+    let mut ids = Vec::with_capacity(NUM_JOINTS + if embedded_imu { 1 } else { 0 });
+    if embedded_imu {
+        ids.push(IMU_DXL_ID);
+    }
+    ids.extend_from_slice(&JOINT_IDS);
+    ids
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_imu_mode_reads_only_the_joint_ids() {
+        assert_eq!(dynamixel_read_ids(false).as_slice(), &JOINT_IDS[..]);
+
+        let embedded = dynamixel_read_ids(true);
+        assert_eq!(embedded.first(), Some(&IMU_DXL_ID));
+        assert_eq!(&embedded[1..], &JOINT_IDS[..]);
+    }
 
     /// One silent servo is the only case a swap can be inferred from. With two silent there is
     /// no telling which the fresh servo replaces, and guessing would flash a leg joint as a neck

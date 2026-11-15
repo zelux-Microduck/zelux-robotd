@@ -10,9 +10,15 @@ use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowS
 #[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
+use std::{fs::File, fs::OpenOptions};
+#[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
@@ -97,6 +103,7 @@ impl SelectedImuSource {
     pub fn ipc(source: IpcImuSource) -> Self {
         Self::Ipc(source)
     }
+
 }
 
 impl ImuSource for SelectedImuSource {
@@ -128,6 +135,7 @@ impl ImuSource for SelectedImuSource {
 #[derive(Deserialize)]
 struct IpcPacket {
     schema: String,
+    publisher_id: Option<String>,
     sequence: u64,
     gyro_rad_s: [f64; 3],
     gravity: [f64; 3],
@@ -143,9 +151,12 @@ struct IpcPacket {
 #[cfg(unix)]
 pub struct IpcImuSource {
     socket: UnixDatagram,
+    _lock: File,
+    path: PathBuf,
     max_age: Duration,
     last: ImuSample,
     last_sequence: Option<u64>,
+    publisher_id: Option<String>,
     last_received: Option<Instant>,
 }
 
@@ -153,6 +164,42 @@ pub struct IpcImuSource {
 impl IpcImuSource {
     pub fn bind(path: impl AsRef<Path>, max_age: Duration) -> Result<Self> {
         let path = path.as_ref();
+        let lock_path = path.with_extension("lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|source| IoError::Port {
+                path: lock_path.display().to_string(),
+                source,
+            })?;
+        lock.try_lock().map_err(|source| IoError::Port {
+            path: lock_path.display().to_string(),
+            source,
+        })?;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                std::fs::remove_file(path).map_err(|source| IoError::Port {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+            }
+            Ok(_) => {
+                return Err(IoError::Bus(format!(
+                    "IMU socket path exists and is not a socket: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(IoError::Port {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        }
         let socket = UnixDatagram::bind(path).map_err(|source| IoError::Port {
             path: path.display().to_string(),
             source,
@@ -163,20 +210,56 @@ impl IpcImuSource {
                 path: path.display().to_string(),
                 source,
             })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+            .map_err(|source| IoError::Port {
+                path: path.display().to_string(),
+                source,
+            })?;
         Ok(Self {
             socket,
+            _lock: lock,
+            path: path.to_path_buf(),
             max_age,
             last: ImuSample::default(),
             last_sequence: None,
+            publisher_id: None,
             last_received: None,
         })
     }
 
     fn accept(&mut self, packet: IpcPacket) {
+        let finite = packet
+            .gyro_rad_s
+            .iter()
+            .chain(packet.gravity.iter())
+            .chain(packet.quaternion_wxyz.iter())
+            .all(|value| value.is_finite());
+        let quat_norm = packet
+            .quaternion_wxyz
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let gravity_norm = packet
+            .gravity
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let publisher_changed = packet
+            .publisher_id
+            .as_deref()
+            .is_some_and(|new_id| self.publisher_id.as_deref() != Some(new_id));
         if packet.schema != "zelux.robotd-imu/v1"
-            || self
-                .last_sequence
-                .is_some_and(|sequence| packet.sequence <= sequence)
+            || packet.publisher_id.as_deref().is_some_and(str::is_empty)
+            || packet.gyro_rad_s.iter().any(|value| value.abs() > 35.0)
+            || !finite
+            || !(0.8..=1.2).contains(&quat_norm)
+            || !(0.8..=1.2).contains(&gravity_norm)
+            || (!publisher_changed
+                && self
+                    .last_sequence
+                    .is_some_and(|sequence| packet.sequence <= sequence))
         {
             return;
         }
@@ -192,8 +275,17 @@ impl IpcImuSource {
                 run: 0,
             },
         };
+        self.publisher_id = packet.publisher_id;
         self.last_sequence = Some(packet.sequence);
         self.last_received = Some(Instant::now());
+    }
+
+}
+
+#[cfg(unix)]
+impl Drop for IpcImuSource {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -210,9 +302,9 @@ impl ImuSource for IpcImuSource {
             match self.socket.recv(&mut bytes) {
                 Ok(len) => match serde_json::from_slice::<IpcPacket>(&bytes[..len]) {
                     Ok(packet) => {
-                        let before = self.last_sequence;
+                        let before = (self.publisher_id.clone(), self.last_sequence);
                         self.accept(packet);
-                        fresh |= self.last_sequence != before;
+                        fresh |= (self.publisher_id.clone(), self.last_sequence) != before;
                     }
                     Err(error) => tracing::warn!(%error, "discarding malformed IMU datagram"),
                 },
@@ -388,10 +480,14 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("robotd-imu-{}-{suffix}.sock", std::process::id()));
         let mut source = IpcImuSource::bind(&path, Duration::from_millis(20)).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o660);
         let sender = UnixDatagram::unbound().unwrap();
+        let make_packet = |publisher: &str, sequence: u64, gyro: &str| {
+            format!(r#"{{"schema":"zelux.robotd-imu/v1","publisher_id":"{publisher}","sequence":{sequence},"gyro_rad_s":{gyro},"gravity":[0.0,0.0,-1.0],"quaternion_wxyz":[1.0,0.0,0.0,0.0],"ready":true}}"#)
+        };
         sender
             .send_to(
-                br#"{"schema":"zelux.robotd-imu/v1","sequence":4,"gyro_rad_s":[1.0,2.0,3.0],"gravity":[0.0,0.0,-1.0],"quaternion_wxyz":[1.0,0.0,0.0,0.0],"ready":true}"#,
+                make_packet("publisher-a", 4, "[1.0,2.0,3.0]").as_bytes(),
                 &path,
             )
             .unwrap();
@@ -400,8 +496,61 @@ mod tests {
         assert_eq!(sample.data.gyro, [1.0, 2.0, 3.0]);
         assert!(sample.ready);
 
+        sender
+            .send_to(
+                make_packet("publisher-b", 0, "[0.5,0.0,0.0]").as_bytes(),
+                &path,
+            )
+            .unwrap();
+        let restarted = source.sample(None).unwrap();
+        assert!(restarted.ready);
+        assert_eq!(restarted.data.gyro, [0.5, 0.0, 0.0]);
+
+        // Older senders omit publisher_id and retain monotonic sequence semantics. A later
+        // identified process must still be allowed to restart at zero after that transition.
+        sender
+            .send_to(
+                br#"{"schema":"zelux.robotd-imu/v1","sequence":1,"gyro_rad_s":[0.2,0.0,0.0],"gravity":[0.0,0.0,-1.0],"quaternion_wxyz":[1.0,0.0,0.0,0.0],"ready":true}"#,
+                &path,
+            )
+            .unwrap();
+        assert_eq!(source.sample(None).unwrap().data.gyro, [0.2, 0.0, 0.0]);
+        sender
+            .send_to(
+                make_packet("publisher-c", 0, "[0.3,0.0,0.0]").as_bytes(),
+                &path,
+            )
+            .unwrap();
+        assert_eq!(source.sample(None).unwrap().data.gyro, [0.3, 0.0, 0.0]);
+
         std::thread::sleep(Duration::from_millis(25));
         assert!(!source.sample(None).unwrap().ready);
-        std::fs::remove_file(path).unwrap();
+        drop(source);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ipc_source_reclaims_stale_socket_but_never_removes_regular_files() {
+        use std::os::unix::net::UnixDatagram;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("robotd-imu-rebind-{}-{suffix}.sock", std::process::id()));
+        let stale = UnixDatagram::bind(&path).unwrap();
+        drop(stale);
+        let rebound = IpcImuSource::bind(&path, Duration::from_millis(20)).unwrap();
+        drop(rebound);
+        assert!(!path.exists());
+
+        std::fs::write(&path, b"keep").unwrap();
+        assert!(IpcImuSource::bind(&path, Duration::from_millis(20)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        let lock_path = path.with_extension("lock");
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(lock_path);
     }
 }

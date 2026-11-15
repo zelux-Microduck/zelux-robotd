@@ -109,8 +109,8 @@ pub const REGISTRY: &[Entry] = &[
     ),
     entry(
         "bus.imu",
-        Kind::Record("source = \"embedded\"\nsocket = \"/run/zelux/robotd-imu.sock\"\nmax_age_ms = 100"),
-        "IMU source selected independently from the servo bus — embedded, unavailable, or ipc",
+        Kind::Record("source = \"ipc\"\nsocket = \"/run/zelux/robotd-imu.sock\"\nmax_age_ms = 100"),
+        "Use the independently selected IMU driver over IPC; stale or unavailable data inhibits motion",
     ),
     entry(
         "bus.feetech",

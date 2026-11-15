@@ -35,8 +35,8 @@ set -eu
 ONNX_VERSION="${ONNX_VERSION:-1.28.0}"
 ONNX_LIB_DIR=/usr/local/lib
 
-# The Dynamixel bus. Every servo and the imu_to_dxl board share it, so without this there
-# is no robot — just a daemon reporting that it cannot see one.
+# The Dynamixel motor bus. In the default IPC IMU mode only the fifteen servos are required;
+# the legacy imu_to_dxl board is needed only when robotd.toml explicitly selects embedded IMU.
 MOTOR_PORT="${MOTOR_PORT:-/dev/ttyS2}"
 
 ENV_TXT=/boot/armbianEnv.txt

@@ -57,10 +57,11 @@ proxy it (`btd/src/route.rs:412`), the updater's degraded IPC declines it
 (`updater/src/ipc.rs:819`), and no daemon subscribes. It was added for the mapping work, which has
 not arrived. So the largest recurring cost in this daemon is a sensor read for nobody.
 
-Worth saying plainly what this is *not*: the walk policy's IMU is a different chip on a different
-bus — the `imu_to_dxl` v2 board on the Dynamixel bus, read in the same 50 Hz `sync_read` as the
-fifteen servos (`duck-control/src/bus.rs`, `duck-control/src/model.rs:76`). Nothing here touches
-it, and nothing here can cost the policy an IMU sample.
+Worth saying plainly what this is *not*: the walk policy's IMU is not `[head_imu]`. By default,
+the selected device driver publishes it to robotd over `zelux.robotd-imu/v1` IPC; the original
+`imu_to_dxl` v2 board on the Dynamixel bus remains available only with
+`bus.imu.source = "embedded"` (`duck-control/src/imu_source.rs`). Nothing here touches the
+control-loop IMU source, and nothing here can cost the policy an IMU sample.
 
 ## What was decided
 

@@ -7,41 +7,48 @@ Implements the `robotd` row of [`architecture.md`](architecture.md) §1 and cove
 [`apirrone/microduck_runtime`](https://github.com/apirrone/microduck_runtime), referred to
 throughout as *the runtime*.
 
-**Only the alpha variant, only the Radxa, only the v2 `imu_to_dxl` board.** v1/v1.5/v1.6, the
-four other IMUs, the three cameras and the Pi are dropped, and every shipped policy is
-`alpha_*`. The wheeled configuration survives as one params switch — `policy.mode = "roller"`
-(§4.2) — because what it selects is a policy set and a tuning preset, not a hardware variant.
+**The alpha servo variant and Radxa remain the supported motion target.** IMU hardware is now
+independent: the default source is the `zelux.robotd-imu/v1` local IPC contract published by the
+selected device driver. The original v2 `imu_to_dxl` board remains available as the explicit
+`bus.imu.source = "embedded"` compatibility mode. Every shipped policy is `alpha_*`; the wheeled
+configuration survives as one params switch — `policy.mode = "roller"` (§4.2) — because what it
+selects is a policy set and a tuning preset, not a hardware variant.
 
 ## 1. The shape of it
 
-One process, one serial bus, one 50 Hz loop. The loop reads all sixteen devices on the bus in
-a single transaction, decides fifteen joint targets, and writes them back. Everything else —
-clients, health, telemetry — hangs off that loop without ever being able to block it.
+One process, one motor serial bus, one 50 Hz loop. By default the loop reads the fifteen joint
+servos only, takes orientation from the independently selected IMU producer over local IPC,
+decides fifteen joint targets, and writes them back. The legacy embedded mode includes the IMU
+board in the serial transaction. Everything else — clients, health, telemetry — hangs off that
+loop without ever being able to block it.
 
 ### 1.1 The bus, and who owns the port
 
-Fifteen servos and the `imu_to_dxl` board share one UART. There is no second bus and no
-second port:
+The fifteen servos share one UART. In the default configuration, `robotd` does not address an
+IMU on that UART; it reads orientation from the device-driver process. The old board can still
+be attached to the UART when `bus.imu.source = "embedded"` is explicitly selected:
 
 ```text
-                     robotd — control thread
-                              │
-                              │  duck_control::bus::DynamixelIo
-                              │  serialport · TIOCEXCL
-                              ▼
-         /dev/ttyS2 · 1 Mbps · Dynamixel protocol v2
-                              │
-    ┌────────────┬────────────┴───────┬──────────────────┐
-    │            │                    │                  │
-  id 200       20–24                30–34             10–14
- imu_to_dxl   left leg        neck · head · mouth     right leg
-  v2 board    5 servos             5 servos           5 servos
+ zeluxd / selected IMU driver ── zelux.robotd-imu/v1 ──► robotd control thread
+                                                            │
+                                                            │ servo-only sync_read/write
+                                                            ▼
+                                       /dev/ttyS2 · 1 Mbps · Dynamixel protocol v2
+                                                            │
+                              ┌────────────┬────────────────┴───────┐
+                              │            │                        │
+                            20–24        30–34                   10–14
+                          left leg    neck · head · mouth        right leg
+                          5 servos         5 servos                5 servos
+
+ Legacy embedded mode only: append id 200 (`imu_to_dxl` v2) to the sync_read ID list.
 ```
 
-The IMU is `id 200` and is read in the *same* `sync_read` as the servos, because that is what
-the hardware does: the v2 board sits on the Dynamixel bus and serves an on-chip SFLP
-quaternion out of the same register block the servos answer at. One board, one code path, no
-IMU abstraction. It is listed first in the id vector so it answers before the servo burst.
+The independent IPC source keeps IMU hardware, bus ownership, driver selection, and control-loop
+release lifecycles separate. A fresh producer is required before motion uses its samples; when
+the producer becomes stale, the source becomes not-ready and does not switch back to another
+sensor mid-run. The legacy `embedded` source preserves the old `id 200` SFLP path for boards that
+still use that layout.
 
 **One owner at a time; tty exclusivity alone does not enforce it.** `serialport` sets `TIOCEXCL`, which
 turns a second *unprivileged* open into `EBUSY` — but `robotd.service` runs as root, because
