@@ -66,14 +66,17 @@ impl AnyBus {
         embedded_imu: bool,
     ) -> Result<Self> {
         Ok(match protocol {
-            BusProtocol::Dynamixel2 => Self::Dynamixel(DynamixelIo::open_with_embedded_imu(
-                port,
-                embedded_imu,
-            )?),
+            BusProtocol::Dynamixel2 => {
+                Self::Dynamixel(DynamixelIo::open_with_embedded_imu(port, embedded_imu)?)
+            }
             BusProtocol::FeetechSts(config) => {
                 Self::Feetech(FeetechIo::open(port, config.clone())?)
             }
         })
+    }
+
+    pub fn enable_imu_dxl(&mut self, mount: [f64; 4], max_age: Duration) -> Result<()> {
+        each!(self, io => io.enable_imu_dxl(mount, max_age))
     }
 
     pub fn protocol_name(&self) -> &'static str {

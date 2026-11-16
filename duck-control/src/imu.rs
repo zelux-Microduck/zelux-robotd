@@ -168,7 +168,7 @@ fn median3_each(history: &[[f64; 3]; 2], now: [f64; 3]) -> [f64; 3] {
 }
 
 /// IEEE 754 binary16 → f64. The LSM6DSV16X ships quaternion components in this format.
-fn half(bits: u16) -> f64 {
+pub(crate) fn half(bits: u16) -> f64 {
     let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = ((bits >> 10) & 0x1F) as i32;
     let frac = (bits & 0x3FF) as f64;
@@ -181,7 +181,7 @@ fn half(bits: u16) -> f64 {
 }
 
 /// Hamilton product, scalar-first.
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+pub(crate) fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     let ([aw, ax, ay, az], [bw, bx, by, bz]) = (a, b);
     [
         aw * bw - ax * bx - ay * by - az * bz,
@@ -192,7 +192,7 @@ fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
 }
 
 /// `q · v · q⁻¹`
-fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
+pub(crate) fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
     let (t, c) = cross_terms(q, v);
     [
         v[0] + q[0] * t[0] + c[0],
@@ -202,7 +202,7 @@ fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
 }
 
 /// `q⁻¹ · v · q` — world vector expressed in the body frame.
-fn rotate_inverse(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
+pub(crate) fn rotate_inverse(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
     let (t, c) = cross_terms(q, v);
     [
         v[0] - q[0] * t[0] + c[0],

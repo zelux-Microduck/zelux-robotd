@@ -357,7 +357,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// `init` argues with that rather than winning. Without it a client either guesses — sitting a
 /// standing duck down every other press — or asks somebody to reach for the pad, which is what the
 /// playground did.
-pub const API_VERSION: u32 = 31;
+/// v32: robot.health includes the process-start IMU identity and configuration revision.
+/// Install robotd and robotctl from the same release to enable Studio IMU management.
+pub const API_VERSION: u32 = 32;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -3315,6 +3317,25 @@ pub struct HealthResult {
     /// Orientation source. Absent from an older `robotd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imu: Option<ImuHealth>,
+    /// Process-start identity, not a claim that the sensor is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imu_runtime: Option<ImuRuntime>,
+}
+
+/// IMU configuration actually loaded by this process. Readiness is in ImuHealth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImuRuntime {
+    pub instance_id: String,
+    pub source: String,
+    pub model: Option<String>,
+    pub driver_id: Option<String>,
+    /// Bundled adapter currently versions with robotd; not an independent package version.
+    pub driver_version: Option<String>,
+    pub mount_profile: Option<String>,
+    pub mount_wxyz: Option<[f64; 4]>,
+    pub revision: String,
+    pub config_path: std::path::PathBuf,
+    pub simulated: bool,
 }
 
 /// The control loop's rate and timing.

@@ -10,34 +10,24 @@ use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowS
 #[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
-use std::{fs::File, fs::OpenOptions};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{fs::File, fs::OpenOptions};
 
 /// One IMU measurement plus the liveness information used by safety and health reporting.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ImuSample {
     pub data: ImuData,
     pub ready: bool,
     pub stale: ImuStale,
-}
-
-impl Default for ImuSample {
-    fn default() -> Self {
-        Self {
-            data: ImuData::default(),
-            ready: false,
-            stale: ImuStale::default(),
-        }
-    }
 }
 
 /// A replaceable producer of orientation samples.
@@ -85,14 +75,21 @@ impl ImuSource for UnavailableImuSource {
 /// control loop or motor backends.
 pub enum SelectedImuSource {
     Embedded(EmbeddedImuSource),
+    /// The model adapter lives in the single-owner bus; this forwards its sample.
+    ImuDxl(EmbeddedImuSource),
     Unavailable(UnavailableImuSource),
     #[cfg(unix)]
-    Ipc(IpcImuSource),
+    // One startup allocation, no per-tick allocation; keep the selection enum small.
+    Ipc(Box<IpcImuSource>),
 }
 
 impl SelectedImuSource {
     pub fn embedded() -> Self {
         Self::Embedded(EmbeddedImuSource)
+    }
+
+    pub fn imu_dxl() -> Self {
+        Self::ImuDxl(EmbeddedImuSource)
     }
 
     pub fn unavailable() -> Self {
@@ -101,15 +98,15 @@ impl SelectedImuSource {
 
     #[cfg(unix)]
     pub fn ipc(source: IpcImuSource) -> Self {
-        Self::Ipc(source)
+        Self::Ipc(Box::new(source))
     }
-
 }
 
 impl ImuSource for SelectedImuSource {
     fn id(&self) -> &'static str {
         match self {
             Self::Embedded(source) => source.id(),
+            Self::ImuDxl(_) => crate::imu_dxl::DRIVER_ID,
             Self::Unavailable(source) => source.id(),
             #[cfg(unix)]
             Self::Ipc(source) => source.id(),
@@ -118,7 +115,7 @@ impl ImuSource for SelectedImuSource {
 
     fn sample(&mut self, embedded: Option<ImuSample>) -> Result<ImuSample> {
         match self {
-            Self::Embedded(source) => source.sample(embedded),
+            Self::Embedded(source) | Self::ImuDxl(source) => source.sample(embedded),
             Self::Unavailable(source) => source.sample(embedded),
             #[cfg(unix)]
             Self::Ipc(source) => source.sample(embedded),
@@ -175,9 +172,11 @@ impl IpcImuSource {
                 path: lock_path.display().to_string(),
                 source,
             })?;
+        // `File::try_lock` 自 Rust 1.89 起返回 `Result<(), TryLockError>`，不再是 io::Result；
+        // TryLockError 实现了 Into<io::Error>，这里显式转换以满足 IoError::Port::source 的类型。
         lock.try_lock().map_err(|source| IoError::Port {
             path: lock_path.display().to_string(),
-            source,
+            source: source.into(),
         })?;
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_socket() => {
@@ -210,11 +209,12 @@ impl IpcImuSource {
                 path: path.display().to_string(),
                 source,
             })?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-            .map_err(|source| IoError::Port {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660)).map_err(
+            |source| IoError::Port {
                 path: path.display().to_string(),
                 source,
-            })?;
+            },
+        )?;
         Ok(Self {
             socket,
             _lock: lock,
@@ -279,7 +279,6 @@ impl IpcImuSource {
         self.last_sequence = Some(packet.sequence);
         self.last_received = Some(Instant::now());
     }
-
 }
 
 #[cfg(unix)]
@@ -361,17 +360,35 @@ impl<B, S> SplitImuIo<B, S> {
     pub fn source_mut(&mut self) -> &mut S {
         &mut self.source
     }
+
+    fn invalidate_imu(&mut self) {
+        self.last_imu.ready = false;
+        self.last_imu.stale.total = self.last_imu.stale.total.saturating_add(1);
+        self.last_imu.stale.run = self.last_imu.stale.run.saturating_add(1);
+    }
 }
 
 impl<B: RobotIo, S: ImuSource> RobotIo for SplitImuIo<B, S> {
     fn read(&mut self) -> Result<Sensors> {
-        let mut sensors = self.bus.read()?;
+        let mut sensors = match self.bus.read() {
+            Ok(sensors) => sensors,
+            Err(error) => {
+                self.invalidate_imu();
+                return Err(error);
+            }
+        };
         let embedded = ImuSample {
             data: sensors.imu,
             ready: self.bus.imu_ready(),
             stale: self.bus.imu_stale(),
         };
-        self.last_imu = self.source.sample(Some(embedded))?;
+        self.last_imu = match self.source.sample(Some(embedded)) {
+            Ok(sample) => sample,
+            Err(error) => {
+                self.invalidate_imu();
+                return Err(error);
+            }
+        };
         sensors.imu = self.last_imu.data;
         Ok(sensors)
     }
@@ -409,6 +426,69 @@ impl<B: RobotIo, S: ImuSource> RobotIo for SplitImuIo<B, S> {
 mod tests {
     use super::*;
     use crate::io::FakeIo;
+
+    #[test]
+    fn imu_dxl_passthrough_keeps_model_identity_and_not_ready_state() {
+        let mut source = SelectedImuSource::imu_dxl();
+        assert_eq!(source.id(), crate::imu_dxl::DRIVER_ID);
+        assert!(!source.sample(None).unwrap().ready);
+        let input = ImuSample {
+            ready: true,
+            ..ImuSample::default()
+        };
+        assert_eq!(source.sample(Some(input)).unwrap(), input);
+    }
+
+    #[test]
+    fn failed_motor_read_cannot_leave_previous_imu_ready() {
+        let expected = ImuSample {
+            ready: true,
+            ..ImuSample::default()
+        };
+        let mut io = SplitImuIo::new(FakeIo::default(), FixedSource(expected));
+        io.read().unwrap();
+        assert!(io.imu_ready());
+        *io.bus_mut() = FakeIo::default().failing_reads(1);
+        assert!(io.read().is_err());
+        assert!(!io.imu_ready());
+        assert_eq!(io.imu_stale(), ImuStale { total: 1, run: 1 });
+        io.read().unwrap();
+        assert!(io.imu_ready());
+    }
+
+    struct FailingSource {
+        fail: bool,
+    }
+
+    impl ImuSource for FailingSource {
+        fn id(&self) -> &'static str {
+            "test.failing"
+        }
+        fn sample(&mut self, _embedded: Option<ImuSample>) -> Result<ImuSample> {
+            if self.fail {
+                Err(IoError::Simulated)
+            } else {
+                Ok(ImuSample {
+                    ready: true,
+                    ..ImuSample::default()
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn failed_source_cannot_leave_previous_imu_ready() {
+        let mut io = SplitImuIo::new(FakeIo::default(), FailingSource { fail: false });
+        io.read().unwrap();
+        assert!(io.imu_ready());
+        io.source_mut().fail = true;
+        assert!(io.read().is_err());
+        assert!(!io.imu_ready());
+        assert_eq!(io.imu_stale(), ImuStale { total: 1, run: 1 });
+        io.source_mut().fail = false;
+        io.read().unwrap();
+        assert!(io.imu_ready());
+    }
 
     struct FixedSource(ImuSample);
 
@@ -478,12 +558,18 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("robotd-imu-{}-{suffix}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("robotd-imu-{}-{suffix}.sock", std::process::id()));
         let mut source = IpcImuSource::bind(&path, Duration::from_millis(20)).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o660);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o660
+        );
         let sender = UnixDatagram::unbound().unwrap();
         let make_packet = |publisher: &str, sequence: u64, gyro: &str| {
-            format!(r#"{{"schema":"zelux.robotd-imu/v1","publisher_id":"{publisher}","sequence":{sequence},"gyro_rad_s":{gyro},"gravity":[0.0,0.0,-1.0],"quaternion_wxyz":[1.0,0.0,0.0,0.0],"ready":true}}"#)
+            format!(
+                r#"{{"schema":"zelux.robotd-imu/v1","publisher_id":"{publisher}","sequence":{sequence},"gyro_rad_s":{gyro},"gravity":[0.0,0.0,-1.0],"quaternion_wxyz":[1.0,0.0,0.0,0.0],"ready":true}}"#
+            )
         };
         sender
             .send_to(
@@ -539,7 +625,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("robotd-imu-rebind-{}-{suffix}.sock", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "robotd-imu-rebind-{}-{suffix}.sock",
+            std::process::id()
+        ));
         let stale = UnixDatagram::bind(&path).unwrap();
         drop(stale);
         let rebound = IpcImuSource::bind(&path, Duration::from_millis(20)).unwrap();

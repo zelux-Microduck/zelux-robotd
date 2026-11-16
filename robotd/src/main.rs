@@ -674,6 +674,46 @@ struct RobotState {
     max_consecutive_errors: u32,
     force_unhealthy: bool,
     force_busy: bool,
+    imu_runtime: proto::ImuRuntime,
+    imu_simulated: AtomicBool,
+}
+
+fn imu_runtime_identity(params: &Params, config_path: &std::path::Path) -> proto::ImuRuntime {
+    let imu = &params.bus.imu;
+    let model = imu.model;
+    let driver = match imu.source {
+        params::ImuSourceKind::ImuDxl => Some("zelux.imu.imu-dxl"),
+        params::ImuSourceKind::Embedded => Some("zelux.imu.legacy-embedded"),
+        // External IPC producer owns its own driver identity; do not invent one here.
+        _ => None,
+    };
+    proto::ImuRuntime {
+        instance_id: format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
+        source: serde_json::to_value(imu.source)
+            .expect("source serializes")
+            .as_str()
+            .expect("source string")
+            .to_owned(),
+        model: model.map(|m| m.id().to_owned()),
+        driver_id: driver.map(str::to_owned),
+        driver_version: driver.map(|_| env!("CARGO_PKG_VERSION").to_owned()),
+        mount_profile: model.map(|m| m.mount_profile().to_owned()),
+        mount_wxyz: if imu.source == params::ImuSourceKind::ImuDxl {
+            imu.resolve_mount(params.bus.protocol).ok()
+        } else {
+            None
+        },
+        revision: robotd_params::imu_management::revision(params.bus.protocol, imu),
+        config_path: std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_owned()),
+        simulated: false,
+    }
 }
 
 impl RobotState {
@@ -685,6 +725,8 @@ impl RobotState {
     ) -> Self {
         Self {
             started: Instant::now(),
+            imu_runtime: imu_runtime_identity(params, config_path),
+            imu_simulated: AtomicBool::new(false),
             ticks: AtomicU64::new(0),
             missed: AtomicU64::new(0),
             last_tick_us: AtomicU64::new(0),
@@ -756,6 +798,10 @@ impl RobotState {
                     consecutive_errors: self.consecutive_errors.load(Ordering::Relaxed),
                     startup_failures: self.startup_bus_failures.load(Ordering::Relaxed),
                 },
+                imu_runtime: Some(proto::ImuRuntime {
+                    simulated: self.imu_simulated.load(Ordering::Relaxed),
+                    ..self.imu_runtime.clone()
+                }),
                 imu: Some(proto::ImuHealth {
                     ready: self.imu_ready.load(Ordering::Relaxed),
                     stale_blocks: self.imu_stale_blocks.load(Ordering::Relaxed),
@@ -980,6 +1026,10 @@ async fn main() -> ExitCode {
         args.busy,
     ));
 
+    state
+        .imu_simulated
+        .store(args.fake || args.sim.is_some(), Ordering::Relaxed);
+
     if args.unhealthy {
         tracing::warn!("--unhealthy: will report unhealthy, so updates will roll back");
     }
@@ -1178,9 +1228,48 @@ fn spawn_control_thread(
                     return;
                 }
             };
+            if params.bus.imu.source == params::ImuSourceKind::ImuDxl {
+                let mount = match params.bus.imu.resolve_mount(params.bus.protocol) {
+                    Ok(mount) => mount,
+                    Err(error) => {
+                        tracing::error!(%error, "invalid IMU model/mount; bus remains unopened");
+                        return;
+                    }
+                };
+                if let Err(error) = duck_control::imu_dxl::ImuDxl::new(
+                    mount,
+                    Duration::from_millis(params.bus.imu.max_age_ms),
+                ) {
+                    tracing::error!(%error, "invalid IMU-DXL configuration; bus remains unopened");
+                    return;
+                }
+            }
             let embedded_imu = params.bus.imu.source == params::ImuSourceKind::Embedded;
             runtime.block_on(async move {
                 if let Some(io) = open_bus_waiting(&port, &protocol, embedded_imu, &state).await {
+                    #[cfg(target_os = "linux")]
+                    let mut io = io;
+                    #[cfg(target_os = "linux")]
+                    if params.bus.imu.source == params::ImuSourceKind::ImuDxl {
+                        let mount = match params.bus.imu.resolve_mount(params.bus.protocol) {
+                            Ok(mount) => mount,
+                            Err(error) => {
+                                tracing::error!(%error, "invalid IMU model/mount; no control loop");
+                                return;
+                            }
+                        };
+                        if let Err(error) = io.enable_imu_dxl(mount, Duration::from_millis(params.bus.imu.max_age_ms)) {
+                            tracing::error!(%error, "invalid IMU-DXL configuration; no control loop");
+                            return;
+                        }
+                        tracing::info!(
+                            driver = duck_control::imu_dxl::DRIVER_ID,
+                            model = params.bus.imu.model.map_or("legacy-explicit", |m| m.id()),
+                            mount_profile = params.bus.imu.model.map_or("legacy-explicit", |m| m.mount_profile()),
+                            ?mount,
+                            "IMU-DXL uses sole motor-bus controller"
+                        );
+                    }
                     control_loop(io, state, intents, params, params_path, period, poweroff).await;
                 }
             });
@@ -1231,12 +1320,7 @@ async fn open_bus_waiting(
 
 /// Open and verify the bus, or explain why not.
 #[cfg(target_os = "linux")]
-fn open_bus(
-    port: &str,
-    protocol: &BusProtocol,
-    embedded_imu: bool,
-    attempt: u32,
-) -> Option<BusIo> {
+fn open_bus(port: &str, protocol: &BusProtocol, embedded_imu: bool, attempt: u32) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
 
@@ -1802,9 +1886,8 @@ async fn control_loop<T: RobotIo>(
     // for the original combined-bus hardware.
     let imu_source = match params.bus.imu.source {
         robotd_params::ImuSourceKind::Embedded => duck_control::SelectedImuSource::embedded(),
-        robotd_params::ImuSourceKind::Unavailable => {
-            duck_control::SelectedImuSource::unavailable()
-        }
+        robotd_params::ImuSourceKind::ImuDxl => duck_control::SelectedImuSource::imu_dxl(),
+        robotd_params::ImuSourceKind::Unavailable => duck_control::SelectedImuSource::unavailable(),
         robotd_params::ImuSourceKind::Ipc => {
             #[cfg(target_os = "linux")]
             {
@@ -1821,7 +1904,9 @@ async fn control_loop<T: RobotIo>(
             }
             #[cfg(not(target_os = "linux"))]
             {
-                tracing::warn!("IMU IPC is available only on Linux; using the fake embedded source");
+                tracing::warn!(
+                    "IMU IPC is available only on Linux; using the fake embedded source"
+                );
                 duck_control::SelectedImuSource::embedded()
             }
         }

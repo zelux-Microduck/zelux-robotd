@@ -45,3 +45,4 @@ serialport = { version = "4.8", default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true
+robotd-params = { path = "../robotd-params" }

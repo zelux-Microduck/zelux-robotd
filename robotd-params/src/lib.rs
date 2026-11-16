@@ -17,7 +17,13 @@
 //! the registry (and therefore the editor) learning about it.
 
 pub mod edit;
+pub mod imu_management;
+#[cfg(test)]
+mod imu_management_tests;
+pub mod imu_model;
 pub mod registry;
+
+pub use imu_model::ImuModel;
 
 use std::path::{Path, PathBuf};
 
@@ -1807,6 +1813,13 @@ pub struct BusImu {
     pub socket: String,
     /// A producer silent for longer than this makes the source not-ready.
     pub max_age_ms: u64,
+    /// Known physical model. Resolves its fixed mounting profile; changes require restart.
+    pub model: Option<ImuModel>,
+    /// Legacy explicit sensor-to-body WXYZ; must agree with a selected fixed model.
+    pub mount_wxyz: Option<[f64; 4]>,
+    /// Calibrated body-frame correction composed with the model's nominal mounting rotation.
+    /// This is written by the guided IMU alignment workflow, not edited as sensor-axis settings.
+    pub mount_correction_wxyz: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1817,6 +1830,8 @@ pub enum ImuSourceKind {
     Ipc,
     /// IMU data included in the motor backend's atomic read (the original Microduck layout).
     Embedded,
+    /// IMU-DXL at ID 200, read by the sole motor-bus owner.
+    ImuDxl,
     /// Bring-up mode: publish not-ready and never substitute a fake upright measurement.
     Unavailable,
 }
@@ -1827,7 +1842,83 @@ impl Default for BusImu {
             source: ImuSourceKind::default(),
             socket: "/run/zelux/robotd-imu.sock".into(),
             max_age_ms: 100,
+            model: None,
+            mount_wxyz: None,
+            mount_correction_wxyz: None,
         }
+    }
+}
+
+impl BusImu {
+    /// Resolve before opening the bus. Unknown models fail serde; B1 is known but
+    /// intentionally blocked until its wire protocol and decoder are verified.
+    pub fn resolve_mount(&self, protocol: BusProtocol) -> Result<[f64; 4], &'static str> {
+        if self.source != ImuSourceKind::ImuDxl {
+            return Err("model mounting requires bus.imu.source = imu-dxl");
+        }
+        if self.max_age_ms == 0 {
+            return Err("bus.imu.max_age_ms must be positive");
+        }
+        let expected = match self.model {
+            Some(ImuModel::QingmuA1) => {
+                if protocol != BusProtocol::FeetechSts {
+                    return Err("qingmu-a1 currently requires bus.protocol = feetech-sts");
+                }
+                Some(ImuModel::QingmuA1.mount_wxyz())
+            }
+            Some(ImuModel::QingmuB1) => {
+                return Err("qingmu-b1 mounting is known but its wire driver is not verified");
+            }
+            None => None,
+        };
+        let explicit = if let Some(q) = self.mount_wxyz {
+            let norm = q.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if !norm.is_finite() || norm < 1e-6 {
+                return Err("bus.imu.mount_wxyz must be finite and nonzero");
+            }
+            Some(q.map(|x| x / norm))
+        } else {
+            None
+        };
+        let base = if let Some(preset) = expected {
+            if let Some(q) = explicit {
+                // Compare rotations, not component signs: q and -q are the same.
+                let dot = q.iter().zip(preset).map(|(a, b)| a * b).sum::<f64>();
+                if dot.abs() < 1.0 - 1e-10 {
+                    return Err(
+                        "mount_wxyz conflicts with fixed model mounting; remove the override",
+                    );
+                }
+            }
+            preset
+        } else {
+            explicit.ok_or("imu-dxl requires a supported model or explicit mount_wxyz")?
+        };
+        let correction = match self.mount_correction_wxyz {
+            Some(q) => {
+                let norm = q.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if !norm.is_finite() || norm < 1e-6 {
+                    return Err("bus.imu.mount_correction_wxyz must be finite and nonzero");
+                }
+                q.map(|x| x / norm)
+            }
+            None => [1.0, 0.0, 0.0, 0.0],
+        };
+        // The correction rotates vectors already expressed in the nominal body frame.
+        // Combined sensor→body = correction × model mounting.
+        let [aw, ax, ay, az] = correction;
+        let [bw, bx, by, bz] = base;
+        let combined = [
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ];
+        let norm = combined.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if !norm.is_finite() || norm < 1e-6 {
+            return Err("resolved IMU mounting is invalid");
+        }
+        Ok(combined.map(|x| x / norm))
     }
 }
 
@@ -1964,6 +2055,8 @@ pub enum ParamsError {
     },
     #[error("{path}: control.hz must be between 1 and 1000, got {got}")]
     Rate { path: String, got: u32 },
+    #[error("{path}: invalid bus.imu configuration: {reason}")]
+    Imu { path: String, reason: &'static str },
     #[error(
         "{path}: media.bitrate must be between {min} and {max} bits per second, got {got} — \
          the unit is bits, so 2 Mb/s is 2000000"
@@ -2044,6 +2137,15 @@ impl Params {
     /// Reject values that would produce a loop that cannot work, at startup rather than as
     /// a division by zero three seconds later.
     fn validate(&self, path: &Path) -> Result<(), ParamsError> {
+        if self.bus.imu.source == ImuSourceKind::ImuDxl || self.bus.imu.model.is_some() {
+            self.bus
+                .imu
+                .resolve_mount(self.bus.protocol)
+                .map_err(|reason| ParamsError::Imu {
+                    path: path.display().to_string(),
+                    reason,
+                })?;
+        }
         if self.control.hz == 0 || self.control.hz > 1000 {
             return Err(ParamsError::Rate {
                 path: path.display().to_string(),
@@ -2911,10 +3013,20 @@ mod tests {
     }
 
     #[test]
+    fn imu_dxl_source_and_explicit_mount_parse_without_changing_ipc_defaults() {
+        let p: Params = toml::from_str(
+            "[bus]\nprotocol = \"feetech-sts\"\n[bus.imu]\nsource = \"imu-dxl\"\nmount_wxyz = [1.0, 0.0, 0.0, 0.0]\n"
+        ).unwrap();
+        assert_eq!(p.bus.imu.source, ImuSourceKind::ImuDxl);
+        assert_eq!(p.bus.imu.mount_wxyz, Some([1.0, 0.0, 0.0, 0.0]));
+        assert_eq!(BusImu::default().source, ImuSourceKind::Ipc);
+        assert!(BusImu::default().mount_wxyz.is_none());
+    }
+
+    #[test]
     fn imu_source_keeps_explicit_legacy_and_bringup_modes() {
         let embedded: Params = toml::from_str("[bus.imu]\nsource = \"embedded\"\n").unwrap();
-        let unavailable: Params =
-            toml::from_str("[bus.imu]\nsource = \"unavailable\"\n").unwrap();
+        let unavailable: Params = toml::from_str("[bus.imu]\nsource = \"unavailable\"\n").unwrap();
         assert_eq!(embedded.bus.imu.source, ImuSourceKind::Embedded);
         assert_eq!(unavailable.bus.imu.source, ImuSourceKind::Unavailable);
     }

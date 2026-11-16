@@ -129,6 +129,12 @@ jobs:
           sh -n scripts/board-test.sh
           shellcheck --shell=sh --exclude=SC2037,SC2016 scripts/board-test.sh
 
+      # Host IMU gate uses bash; no production service or board deployment.
+      - name: Lint the host IMU gate
+        run: |
+          bash -n scripts/validate-imu.sh
+          shellcheck --shell=bash scripts/validate-imu.sh
+
       # The publish tooling must keep working, or a release can't be cut. Cheap to
       # assert here rather than discovering it at tag time.
       # Packages every binary a release ships, not just one: this is the step that would

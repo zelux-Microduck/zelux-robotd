@@ -540,6 +540,86 @@ fn lock(path: &Path) -> Result<Lock, String> {
     Ok(file)
 }
 
+/// Select a supported IMU under the existing config writer lock. No hardware access.
+pub fn select_imu_model(path: &Path, model: crate::ImuModel, expected: &str) -> Result<(), String> {
+    let guard = lock(path)?;
+    let mut document = Model::load(path)?;
+    let params = Params::load(path, false).map_err(|e| e.to_string())?;
+    if crate::imu_management::revision(params.bus.protocol, &params.bus.imu) != expected {
+        return Err("IMU configuration changed; refresh before saving".into());
+    }
+    let same_model = params.bus.imu.source == crate::ImuSourceKind::ImuDxl
+        && params.bus.imu.model == Some(model);
+    let candidate = crate::BusImu {
+        source: crate::ImuSourceKind::ImuDxl,
+        model: Some(model),
+        mount_wxyz: None,
+        mount_correction_wxyz: if same_model {
+            params.bus.imu.mount_correction_wxyz
+        } else {
+            None
+        },
+        ..params.bus.imu
+    };
+    candidate
+        .resolve_mount(params.bus.protocol)
+        .map_err(str::to_owned)?;
+    let bus = document.doc.entry("bus").or_insert(toml_edit::table());
+    let imu = bus
+        .as_table_mut()
+        .ok_or("bus is not a table")?
+        .entry("imu")
+        .or_insert(toml_edit::table());
+    let imu = imu.as_table_mut().ok_or("bus.imu is not a table")?;
+    imu["source"] = toml_edit::value("imu-dxl");
+    imu["model"] = toml_edit::value(model.id());
+    imu.remove("mount_wxyz");
+    if !same_model {
+        imu.remove("mount_correction_wxyz");
+    }
+    document.write_through(&guard, &document.doc.to_string())
+}
+
+/// Save a guided sensor-to-body alignment correction under the shared robotd config lock.
+pub fn set_imu_mount_correction(
+    path: &Path,
+    correction: [f64; 4],
+    expected: &str,
+) -> Result<(), String> {
+    let guard = lock(path)?;
+    let mut document = Model::load(path)?;
+    let params = Params::load(path, false).map_err(|e| e.to_string())?;
+    if crate::imu_management::revision(params.bus.protocol, &params.bus.imu) != expected {
+        return Err("IMU configuration changed; refresh before saving calibration".into());
+    }
+    if params.bus.imu.source != crate::ImuSourceKind::ImuDxl
+        || !params.bus.imu.model.is_some_and(crate::ImuModel::calibration_supported)
+    {
+        return Err("guided mounting calibration is not supported for this IMU model".into());
+    }
+    let candidate = crate::BusImu {
+        mount_correction_wxyz: Some(correction),
+        ..params.bus.imu.clone()
+    };
+    candidate
+        .resolve_mount(params.bus.protocol)
+        .map_err(str::to_owned)?;
+
+    let bus = document.doc.entry("bus").or_insert(toml_edit::table());
+    let imu = bus
+        .as_table_mut()
+        .ok_or("bus is not a table")?
+        .entry("imu")
+        .or_insert(toml_edit::table());
+    let imu = imu.as_table_mut().ok_or("bus.imu is not a table")?;
+    let mut array = toml_edit::Array::new();
+    for value in correction {
+        array.push(value);
+    }
+    imu["mount_correction_wxyz"] = toml_edit::value(array);
+    document.write_through(&guard, &document.doc.to_string())
+}
+
 /// Add or replace one `[[policy.skill]]` entry, by name.
 ///
 /// Load, edit and write under one hold of the lock, because a repeating table cannot be queued

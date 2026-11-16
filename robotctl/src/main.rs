@@ -45,6 +45,7 @@ mod cells;
 mod configure;
 mod duck;
 mod frame;
+mod imu_config;
 mod imu_view;
 mod monitor;
 mod path_map;
@@ -122,6 +123,18 @@ struct Cli {
 /// `robotctl motors` later is additive rather than a restructure.
 #[derive(Subcommand, Debug)]
 enum Namespace {
+    /// JSON IMU catalog/configuration. Saving never restarts the daemon.
+    ImuStatus,
+    ImuConfig {
+        #[arg(long, default_value = robotd_params::DEFAULT_PATH)]
+        file: PathBuf,
+        #[arg(long, requires = "expected")]
+        model: Option<String>,
+        #[arg(long, requires = "expected", conflicts_with = "model")]
+        mount_correction_wxyz: Option<String>,
+        #[arg(long)]
+        expected: Option<String>,
+    },
     /// Save one fresh raw UYVY frame; geometry is printed to stderr.
     Frame {
         #[arg(long, default_value = "frame.uyvy")]
@@ -4602,6 +4615,23 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }
         Namespace::Chorale { off, piece } => {
             return run_chorale(&cli.robot_socket, off, piece);
+        }
+        Namespace::ImuStatus => {
+            return imu_config::status(&cli.robot_socket);
+        }
+        Namespace::ImuConfig {
+            file,
+            model,
+            mount_correction_wxyz,
+            expected,
+        } => {
+            return imu_config::run(
+                &file,
+                model.as_deref(),
+                mount_correction_wxyz.as_deref(),
+                expected.as_deref(),
+            )
+                .map_err(|e| Failure::new(exit::FAILED, e));
         }
         Namespace::Configure { file, list, json } => {
             let result = if list {

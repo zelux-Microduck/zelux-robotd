@@ -110,7 +110,7 @@ pub const REGISTRY: &[Entry] = &[
     entry(
         "bus.imu",
         Kind::Record("source = \"ipc\"\nsocket = \"/run/zelux/robotd-imu.sock\"\nmax_age_ms = 100"),
-        "Use the independently selected IMU driver over IPC; stale or unavailable data inhibits motion",
+        "IMU source: ipc, embedded, imu-dxl (model qingmu-a1 on feetech-sts or explicit mount_wxyz), or unavailable; qingmu-b1 not yet supported; changes require restart",
     ),
     entry(
         "bus.feetech",

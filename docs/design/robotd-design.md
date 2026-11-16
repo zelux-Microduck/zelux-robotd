@@ -2,6 +2,13 @@
 
 Status: draft · Date: 2026-08-20 · Owner: pierre
 
+> 2026-11-15 planning correction: the current user-confirmed device is a shared-bus
+> IMU-DXL, not an independent I²C IMU. The existing IPC implementation described
+> below is a separate path. Initial shared-bus adapter code is now present but
+> has not been compiled or hardware-validated here. See the
+> [IMU-DXL adaptation plan](imu-dxl-adaptation-plan.md) for model-specific decoding,
+> single-owner bus scheduling, and revised acceptance criteria.
+
 Implements the `robotd` row of [`architecture.md`](architecture.md) §1 and covers
 [`roadmap.md`](../project/roadmap.md) M3. The prototype being absorbed is
 [`apirrone/microduck_runtime`](https://github.com/apirrone/microduck_runtime), referred to

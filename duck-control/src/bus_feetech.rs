@@ -17,9 +17,9 @@
 //! - **The sign of a joint is not a given.** On the XL330 robot the horn orientation fixes the
 //!   positive direction and it matches the model. With different servos in remodelled parts
 //!   that has to be measured per joint, so it is a parameter: [`FeetechConfig::directions`].
-//! - **There is no IMU on this bus.** The `imu_to_dxl` board speaks Dynamixel Protocol 2; until
-//!   a Feetech-speaking IMU source exists this backend reports the default orientation and
-//!   says, through [`RobotIo::imu_ready`], that it is not a measurement.
+//! - **An optional IMU-DXL shares this controller.** It is read by the sole bus owner
+//!   after the motor transaction; the model adapter supplies normalised orientation.
+//!   No IMU is addressed unless explicitly selected.
 //!
 //! Register addresses and semantics are from Feetech's *磁编码 STS 内存表* v1.1 (2026-08-27) and
 //! *SCS 通信协议* v1.0 (2026-06-09); `rustypot`'s `sts3215` table agrees with them.
@@ -30,6 +30,8 @@ use std::time::Duration;
 use rustypot::servo::feetech::sts3215::Sts3215Controller;
 
 use crate::imu::ImuData;
+use crate::imu_dxl::{self, ImuDxl};
+use crate::io::ImuStale;
 use crate::io::{IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
 use crate::model::{
     BAUD_RATE, FACTORY_ID, FEETECH_EXPECTED_MODE, JOINT_IDS, JOINT_NAMES, NUM_JOINTS,
@@ -145,15 +147,38 @@ pub struct FeetechIo {
     speed_steps_per_count: f64,
     /// Voltage and temperatures from the last tick's block, so `slow_sensors` is free.
     last_slow: Option<SlowSensors>,
+    imu_dxl: Option<ImuDxl>,
 }
 
 impl FeetechIo {
+    /// Reuses this controller; never opens a second handle to the shared bus.
+    pub fn enable_imu_dxl(&mut self, mount: [f64; 4], max_age: Duration) -> Result<()> {
+        self.imu_dxl = Some(ImuDxl::new(mount, max_age)?);
+        Ok(())
+    }
+
+    fn poll_imu_dxl(&mut self) -> Option<ImuData> {
+        self.imu_dxl.as_ref()?;
+        let started = std::time::Instant::now();
+        let frame = imu_dxl::transaction::feetech(|ids, address, length| {
+            self.controller
+                .sync_read_raw_data(ids, address, length)
+                .map_err(|e| IoError::Bus(format!("IMU-DXL Feetech read: {e}")))
+        });
+        let imu = self.imu_dxl.as_mut().expect("enabled above");
+        let now = std::time::Instant::now();
+        // Conservatively age the sample from request start, not transaction end.
+        imu.observe(frame, started);
+        Some(imu.sample(now).data)
+    }
+
     pub fn open(port: &str, config: FeetechConfig) -> Result<Self> {
         Ok(Self {
             controller: open_controller(port, BAUD_RATE)?,
             config,
             speed_steps_per_count: 1.0,
             last_slow: None,
+            imu_dxl: None,
         })
     }
 
@@ -564,6 +589,9 @@ impl RobotIo for FeetechIo {
                 temps_c,
             });
         }
+        if let Some(imu) = self.poll_imu_dxl() {
+            sensors.imu = imu;
+        }
         Ok(sensors)
     }
 
@@ -628,10 +656,17 @@ impl RobotIo for FeetechIo {
         })
     }
 
-    /// No IMU on this bus yet: the orientation in [`Sensors`] is the upright default, and this
-    /// is what tells the rest of the daemon not to treat it as a measurement.
     fn imu_ready(&self) -> bool {
-        false
+        self.imu_dxl
+            .as_ref()
+            .is_some_and(|imu| imu.sample(std::time::Instant::now()).ready)
+    }
+
+    fn imu_stale(&self) -> ImuStale {
+        self.imu_dxl
+            .as_ref()
+            .map(|imu| imu.sample(std::time::Instant::now()).stale)
+            .unwrap_or_default()
     }
 }
 

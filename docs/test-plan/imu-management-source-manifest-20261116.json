@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-16",
+  "scope": "Uncommitted IMU management milestone, source only; not deployed binary identity",
+  "repositories": {
+    "zelux-robotd": {
+      "head": "22fcca3b0d3dfe390707e9668200f695197c2059",
+      "changed_source_sha256": {
+        ".github/workflows/ci.yml": "f4bfbdc68268f3532250460e70808eedbfe722ebcf030e9732725e2fdd891aaf",
+        "Cargo.lock": "59710ea9042b090a51f4bdfab4a5159bc2f7404da983da59963221aa4180a5a5",
+        "deploy/robotd.toml": "cc1875be658448c169ced8289fa2a683c4f435ea87af0df6cdd341c7110f3129",
+        "duck-control/Cargo.toml": "1a6e64b554b84218b518bba4589b4f39022bf0e30dd72ca70d32e4428fdb6e24",
+        "duck-control/src/bus.rs": "9e76b993b325a1c2caa6e4c863e559a95b3036c05943e7c575db0d6a98c856cc",
+        "duck-control/src/bus_feetech.rs": "fbeb9c42aa0072ba98fc3d4e987527a7e6bff19e2244fa479ea45ef947a40a9e",
+        "duck-control/src/bus_select.rs": "979f33ad0ced5e4e0cf25a090ea5f6f0521d6dc826d85dd890e8005908580b06",
+        "duck-control/src/imu.rs": "4e19ca9ea3211ab9ad57aa39fa4785e3ad57d351d08b0d57dd1593ab6af267a9",
+        "duck-control/src/imu_dxl.rs": "e9e152b70e1db8c358e740cecade00899c769ac2060b9a0c0c7e21f7020f11ef",
+        "duck-control/src/imu_dxl/transaction.rs": "1fc9f5579a6a5467044638522fc5180f356295324d8b57b4d134e627d0b518bd",
+        "duck-control/src/imu_source.rs": "40cb2b8afa2e4d1f7c69ddf954f1a1edaad8fc20ac794fd22a2e2920a8a72a21",
+        "duck-control/src/lib.rs": "1f2563b00028aa98c0fe3ca59c4861bafbad2f06934b30f30215764c2a7afee8",
+        "duck-ipc-proto/src/lib.rs": "d453be7a16f571ce94d75b855dd9c603ff5ce7727e9f32221f0791cda307b605",
+        "robotctl/src/imu_config.rs": "b8f4a8cde0b1f03f08f684c024fdbad25f1357d8fa5ccae3f306be130a78c9ea",
+        "robotctl/src/main.rs": "0fb005de868dce1e773a9f04a250ceeed1d099931754cf6f2262fae0fc2ca763",
+        "robotctl/tests/imu_management.rs": "93d59ddada3ee0d672c2554bbfea9b2c30a209d43948485ed9b7fd8432925602",
+        "robotd-params/src/edit.rs": "084d7e56ac9784340f186774a4e15614b6717942e2a96ee3375b8b9d2f8bd2aa",
+        "robotd-params/src/imu_management.rs": "952e7bdd364bf586823b17da31ba39c6707cb0af8c26952f8f431cb2278bb71d",
+        "robotd-params/src/imu_management_tests.rs": "1b8ee3ca799f5904d9ec69d846054ffd2467a38d98c503b467a2fd07903a207c",
+        "robotd-params/src/imu_model.rs": "7cf5b5a575cbe667a2e608db597ad44deae221d1197c1046508c4eba4e4690e4",
+        "robotd-params/src/lib.rs": "8911690107cc64062e7567473c1e24283150431d1bacdc91550fff4bec5267e7",
+        "robotd-params/src/registry.rs": "c165e9e42a878b3a5021f5771e1683e9549bf9ee988c12ad00379638b5c0485e",
+        "robotd/src/main.rs": "eaad8145da1ffbc5981a86b7bf059875a645d2dca3010783038bf6fc7bbd69a7",
+        "scripts/validate-imu.sh": "b853be97483a30c69614a0388ae0bc4c8b86cf7d76bf580701c3b53b3c69635b"
+      }
+    },
+    "zelux-device-agent": {
+      "head": "e054c6037699f8b57b9495f27f2cf3abbb8d0d2a",
+      "changed_source_sha256": {
+        ".github/workflows/ci.yml": "222b3499e7b5a4d4d12a3215d1b95a5490d04aae4c0ae08eda0d783e24fcfefa",
+        "software/zeluxd/config.py": "c5a13c8793cd8f240b5fd8a13d3120641a0fd5bb1b0686175b43cc62fb91065e",
+        "software/zeluxd/hal/radxa.py": "65d2a4d0a936078316e80d11f08ca01931993ea514fdc154175719d19cf85199",
+        "software/zeluxd/hal/radxa_fan.py": "da07f5a14178ef490403cbcca0146acb1878a93f70c3aac6c9d294081822e589",
+        "software/zeluxd/modules/fan.py": "2c1d8753c616596f726ef482aecaadb69f65cd607dbb25e70b2968095abefd4f",
+        "software/zeluxd/modules/imu.py": "c26c7df268b359d14120b0c0229913521e1e6796f760f5e5d52479803ae30d36",
+        "software/zeluxd/protocol.py": "6862fc17c474ca19dd80ed934b60ce5a2eba1c67e0bef0a9ac2b751bdc40254a",
+        "software/zeluxd/robotd_imu.py": "75ee33f36fa31cc675543f117423c587a788a9fa1bdbc3d2746e0aae29e70fe2",
+        "software/zeluxd/tests/test_hal_selection.py": "941ff8d4479190911d6929df7ce50737fdb6489743393d009bd83ac2efe9150d",
+        "software/zeluxd/tests/test_robotd_imu_management.py": "b38641ff14380157d09480c59dfb78eb034639783a167d3ad022625876f489c2",
+        "software/zeluxd/tests/test_robotd_imu_process.py": "72980cc740ccac6c76d872192e07783a21e8032f1e350162a00bc30d2e84bbbb"
+      }
+    },
+    "zelux-studio": {
+      "head": "5e74d8e398b55592d3c363342c6d2da45451feb9",
+      "changed_source_sha256": {
+        ".github/workflows/ci.yml": "75f83b72f84e25bce9de1f94a8155f5e71e2fc6829a7fdf309886c60d87948ec",
+        "js/pages/drivers.js": "8a2db1cf7b172ca48944d8c8bda2de6c9322949f3f75fb54dc3ec00bb9f1be02",
+        "js/pages/imu-management-state.js": "29b2a974cd78a5483a733f190ea9a3031a3c7154bf92ed30fa505c6081803e74",
+        "js/pages/imu-management.js": "d3785849226d9d0dfd892833daabf2917ffb836f41a02e97c03156a9e27b10c3",
+        "js/pages/imu.js": "1ea32d677d2b66c43ad2f31f6a7ac553c5614822c41eb560e1cc6ee8c802cc4c",
+        "tools/test-imu-management-dom.mjs": "0d01b6dd341f3b996ee536ced2df7ff3349b83a7d9c64419cd53d73c3b93790c",
+        "tools/test-imu-management.mjs": "ebcad229258be157c7cb6c52fd8f4d7dbbb4477fc47b0be398d1e3375a75c4c9"
+      }
+    },
+    "zelux-protocol": {
+      "head": "d2296dfb2a0d14a0675f34c39fab3cedfaccf47f",
+      "changed_source_sha256": {
+        ".github/workflows/ci.yml": "69b909f4aa4574589c8e8a9772fe91b135865c934bc4de7b678b5c4efa65d99e",
+        "VERSION": "64d23f858ef51b0f996e4966d4e27c0371b437e2d2787890b1f7ad22d4ec5663",
+        "examples/imu-management-commands.json": "bdd3290c47b2936892b7e8ab0b7c11965315ee99edc717f6c8f83e9a57c0c5f9",
+        "examples/imu-management-ready.json": "c86a1b6b87e948239ecd3cafcc8444bb717a78730276ac38f66dfd3bcf786b13",
+        "examples/imu-management.json": "9a4d35b6adf897ec96ef8840becafeaf56957805d0c3899214e498c3c91cf8a3",
+        "requirements-dev.txt": "2537e27e206618c2682a6fc3260bf57e4688df1f1a557b8890e7b4f482eacbd3",
+        "schemas/imu-management.schema.json": "703e9ce4729cfb48046704d8e0f87ddce94832e2e027c2406b1aa4e06776c5b7",
+        "tools/validate.py": "a01333f1fe026248a0812a739ad5f6f7bb30a5e08d875c22c0ac31599aacd4ce"
+      }
+    },
+    "zelux-device-drivers": {
+      "head": "d36471e003f0b77c7a9d8262c4e592239d171890",
+      "changed_source_sha256": {
+        "src/zelux_drivers/radxa/fan.py": "37b55ab97268e61f75a71c4a61d1056ff7e0b49622306ff3e4fd36e2efa2e627"
+      }
+    }
+  }
+}
+

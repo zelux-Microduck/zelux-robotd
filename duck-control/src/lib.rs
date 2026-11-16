@@ -12,6 +12,7 @@ pub mod bus_feetech;
 pub mod bus_select;
 pub mod fall;
 pub mod imu;
+pub mod imu_dxl;
 pub mod imu_source;
 pub mod io;
 pub mod model;
@@ -22,12 +23,11 @@ pub mod safety;
 pub mod sim;
 
 pub use imu::ImuData;
-pub use imu_source::{
-    EmbeddedImuSource, ImuSample, ImuSource, SelectedImuSource, SplitImuIo,
-    UnavailableImuSource,
-};
 #[cfg(unix)]
 pub use imu_source::IpcImuSource;
+pub use imu_source::{
+    EmbeddedImuSource, ImuSample, ImuSource, SelectedImuSource, SplitImuIo, UnavailableImuSource,
+};
 pub use io::{FakeIo, IoError, JointTargets, RobotIo, Sensors, SlowSensors};
 pub use model::{
     BATTERY_EMPTY_V, BATTERY_FULL_V, DEFAULT_POSITION, JOINT_IDS, JOINT_NAMES, NUM_JOINTS,

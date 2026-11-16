@@ -18,6 +18,7 @@ use std::time::Duration;
 use rustypot::servo::dynamixel::xl330::Xl330Controller;
 
 use crate::imu::{IMU_BLOCK_LEN, SflpDecoder};
+use crate::imu_dxl::{self, ImuDxl};
 use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
 use crate::model::{
     BAUD_RATE, EXPECTED_REGISTERS, FACTORY_BAUD_RATE, FACTORY_ID, IMU_DXL_ID, JOINT_IDS,
@@ -107,6 +108,7 @@ pub struct DynamixelIo {
     /// The legacy IMU first when enabled, then servos in [`JOINT_IDS`] order.
     ids: Vec<u8>,
     embedded_imu: bool,
+    imu_dxl: Option<ImuDxl>,
     imu: SflpDecoder,
     /// Blocks identical to their predecessor. The read succeeded but the board handed back
     /// the same sample, which means the policy is being fed dead orientation data — a
@@ -115,6 +117,30 @@ pub struct DynamixelIo {
 }
 
 impl DynamixelIo {
+    /// Model selection never changes port ownership. Do not mix the legacy decoder.
+    pub fn enable_imu_dxl(&mut self, mount: [f64; 4], max_age: Duration) -> Result<()> {
+        let adapter = ImuDxl::new(mount, max_age)?;
+        self.embedded_imu = false;
+        self.ids = dynamixel_read_ids(false);
+        self.imu_dxl = Some(adapter);
+        Ok(())
+    }
+
+    fn poll_imu_dxl(&mut self) -> Option<crate::imu::ImuData> {
+        self.imu_dxl.as_ref()?;
+        let started = std::time::Instant::now();
+        let frame = imu_dxl::transaction::dynamixel(|ids, address, length| {
+            self.controller
+                .sync_read_raw_data(ids, address, length)
+                .map_err(|e| IoError::Bus(format!("IMU-DXL Dynamixel read: {e}")))
+        });
+        let imu = self.imu_dxl.as_mut().expect("enabled above");
+        let now = std::time::Instant::now();
+        // Conservatively age the sample from request start, not transaction end.
+        imu.observe(frame, started);
+        Some(imu.sample(now).data)
+    }
+
     pub fn open(port: &str) -> Result<Self> {
         Self::open_with_embedded_imu(port, true)
     }
@@ -130,6 +156,7 @@ impl DynamixelIo {
             port: port.to_owned(),
             ids,
             embedded_imu,
+            imu_dxl: None,
             imu: SflpDecoder::default(),
             stale_imu: StaleImuTracker::default(),
         })
@@ -471,7 +498,7 @@ impl RobotIo for DynamixelIo {
             &blocks[1..]
         } else {
             &blocks[..]
-        }
+        };
 
         for (joint, block) in joints.iter().enumerate() {
             if block.len() != READ_LEN as usize {
@@ -489,6 +516,9 @@ impl RobotIo for DynamixelIo {
             sensors.positions[joint] = (2.0 * PI * position as f64 / 4096.0) - PI;
         }
 
+        if let Some(imu) = self.poll_imu_dxl() {
+            sensors.imu = imu;
+        }
         Ok(sensors)
     }
 
@@ -594,6 +624,9 @@ impl RobotIo for DynamixelIo {
     }
 
     fn imu_stale(&self) -> ImuStale {
+        if let Some(imu) = &self.imu_dxl {
+            return imu.sample(std::time::Instant::now()).stale;
+        }
         if self.embedded_imu {
             self.stale_imu.stale
         } else {
@@ -602,6 +635,9 @@ impl RobotIo for DynamixelIo {
     }
 
     fn imu_ready(&self) -> bool {
+        if let Some(imu) = &self.imu_dxl {
+            return imu.sample(std::time::Instant::now()).ready;
+        }
         self.embedded_imu && self.imu.ready()
     }
 }

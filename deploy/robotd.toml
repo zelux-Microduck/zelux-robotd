@@ -33,6 +33,19 @@ port = "/dev/ttyS2"
 # source = "ipc"
 # socket = "/run/zelux/robotd-imu.sock"
 # max_age_ms = 100
+#
+# Shared-bus IMU-DXL (NOT the old embedded/SFLP board):
+# source = "imu-dxl"
+# max_age_ms = 100
+# Current qingmu-a1 uses [bus] protocol = "feetech-sts" and fixed vertical mounting.
+# model = "qingmu-a1"
+# No mount_wxyz is needed with this model. A conflicting explicit rotation is refused.
+# qingmu-b1's horizontal mounting is recorded, but its wire driver is not verified:
+# selecting model = "qingmu-b1" is refused before the bus opens.
+# Legacy custom IMU-DXL without model still requires measured mount_wxyz.
+# Do not reuse identity for qingmu-a1; its board axes do NOT match body axes.
+# Uses the [bus] protocol and existing serial controller; do not run an Agent
+# serial IMU reader in parallel. No IPC IMU socket is bound in this mode.
 
 # Feetech builds only. p_scale maps the XL330-scale gains used everywhere else in this file
 # onto the servo's one-byte P; directions is +1/-1 per joint (left leg, neck/head/mouth, right

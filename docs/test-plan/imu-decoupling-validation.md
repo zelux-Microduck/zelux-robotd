@@ -1,5 +1,7 @@
 # robotd 与 IMU 解耦测试执行单
 
+> 2026-11-15 设备信息修订：用户确认当前为共享舵机总线的 IMU-DXL。下文保留已有测试事实；无 ID 200 的要求只适用于独立 IPC 场景，不能作为该型号的通用验收条件。共享总线适配、差异和新增测试计划见 [IMU-DXL 修订方案](../design/imu-dxl-adaptation-plan.md)，适配尚未实现。
+
 ## 1. 测试目的
 
 验证当前实现满足以下目标：
@@ -153,28 +155,27 @@ systemctl stop zeluxd
 
 预期：robotd 运行时 init 被锁拒绝；robotd 停止时 init 可独占总线完成动作；不会出现两个进程同时控制舵机。
 
-## 5. 结果记录模板
+## 5. 最新结果（2026-11-15 22:45–22:51，GMT+8）
 
-执行时间：2026-11-15 15:56–16:20（GMT+8）。执行人：自动化执行（WorkBuddy）。
-设备：Radxa Zero 3W / Armbian 13 trixie / aarch64 / 192.168.2.117。
+本轮通过 SSH 在 192.168.2.117 执行。第 8 节保留早期历史记录，其中“robotd 未安装”“无 UART2”“无 robot 组”已不再代表当前状态；本轮证据和限制见第 9 节。
 
-| 用例 | 结果 | 设备/驱动版本 | 日志或截图 | 备注 |
-|---|---|---|---|---|
-| T01 | **阻塞** | zeluxd 1.4.0（mode=radxa）、robotd 未安装 | 见 8.3-T01 | robotd 未部署 + 无 IMU 硬件 + socket 不存在，三个前置同时缺失 |
-| T02 | **阻塞** | 同上 | 见 8.3-T02 | 无 Dynamixel 总线，无法构造"有舵机、无 ID 200"的场景 |
-| T03 | **阻塞** | 同上 | 见 8.3-T03 | embedded 路径同样依赖 robotd 与 ID 200 硬件 |
-| T04 | **阻塞**（机制侧**不通过**） | zeluxd 1.4.0 / drivers 已部署 | 见 8.2、8.3-T04 | 无 IMU 型号可选；其依赖的驱动选择路径被单测证伪（2 failed） |
-| T05 | **阻塞** | 同上 | 见 8.3-T05 | stale 判定在 robotd 侧，无可观测对象 |
-| T06 | **阻塞** | 同上 | 见 8.3-T06 | publisher_id 重置需 robotd 接收端才能验证接受行为 |
-| T07 | **阻塞** | 同上 | 见 8.3-T07 | 非法帧防护属 robotd 接收端行为 |
-| T08 | **阻塞** | 同上 | 见 8.3-T08 | robotd 二进制不存在，"重复启动"无法构造 |
-| T09 | **前置不通过** | 同上 | 见 8.3-T09 | `robot` 组在本机根本不存在，socket 也不存在 |
-| T10 | **阻塞** | 同上 | 见 8.3-T10 | `robotd init` 不存在 |
+设备：Radxa Zero 3W / Armbian 26.8.1 trixie / Linux 6.1.115-vendor-rk35xx / Python 3.13.5。
+部署版本：Agent 1.4.0、Drivers 1.2.0、Protocol 1.2.0、robotd 0.14.1。
 
-**结论**：T01–T10 全部无法在本机完成，10 条中 0 条可判定通过。
-主路径（T01/T02/T05/T06/T07/T08/T09）与兼容路径（T03/T10）均未进入执行阶段，
-原因不是被测行为不达标，而是**被测对象 robotd 未部署在设备上**（详见 8.4）。
-可执行的旁证只有第 3 节主机测试，其中 `test_hal_selection` **2 条失败**，属真实缺陷（见 8.2）。
+| 用例 | 本轮结果 | 实际覆盖与证据 | 未完成项/原因 |
+|---|---|---|---|
+| T01 | 阻塞，未通过完整验收 | 已确认 IPC 配置、版本、UART2 和 Agent 状态；日志报告 IMU 未探测到 | 未启动真实 robotd、未重启 Agent、未做动作；没有有效 IMU，现场安全姿态/断电看护未确认 |
+| T02 | 阻塞 | 舵机总线已恢复；此前 Studio 日志曾报告 15/15 在线 | 未对真实 robotd 进行总线事务观测，未证明没有 ID 200 访问或 ready |
+| T03 | 阻塞 | 未修改 embedded 配置 | 未提供并确认在线的旧 ID 200 IMU，未测试兼容硬件和动作 |
+| T04 | 阻塞；相关回归不通过 | HAL 选择 unittest：1 通过、2 失败；见 9.2 | 遵循第 6 节，T01/T02 未通过前不做 Studio 驱动切换；未验证型号切换/持久化 |
+| T05 | 阻塞 | 当前真实 robotd 停止，实际 IMU socket 不存在 | 没有接收端有效帧基线，未停止生产 Agent；不能验证 stale 对控制环的作用 |
+| T06 | 部分通过，接收侧阻塞 | 以 zelux 运行两次实际 ImuPublisher，合成 HAL + Python 接收器；各收到 15 帧，publisher_id 不同，sequence 从 0 递增 | 未重启生产 zeluxd，也未证明 robotd 接受新发布者 |
+| T07 | 阻塞 | 未注入真实 IMU 接收端，未运行 Rust 测试 | 没有安全可用的真实接收端；--fake 绕过物理 IPC IMU，不能作为替代；各非法帧项均未验收 |
+| T08 | 控制 socket 三项通过；IMU socket 未覆盖 | 真机已安装二进制 + 隔离 --fake 实例：重复实例退出 1；普通文件保持原文；残留控制 socket 可重建 | 未验证 IpcImuSource 的 datagram socket 安全；不能据此宣布完整 IMU 验收通过 |
+| T09 | 部分通过，部署端阻塞 | zelux 属于 robot 组；隔离 root:robot 0660 datagram fixture：zelux 可发送、nobody PermissionError | fixture 是 Python 接收器，不是生产 robotd socket；实际 socket 权限未验收 |
+| T10 | 锁拒绝分支通过；完整用例阻塞 | 隔离 fake daemon 持锁时 init 退出 1：another robotd owns this socket；另指定不存在的串口作为防线 | 未执行停机后 init 的上力/HOME 分支，未在真实总线上执行动作 |
+
+**结论：本轮未达到第 7 节的主路径或兼容路径通过标准。** T01–T10 已逐项记录状态，但未执行的硬件/运动步骤仍为阻塞，不计为通过。隔离测试不是物理 IMU 或整机验收。生产服务保持测试前状态，未改协议或绕过校验。
 
 ## 6. 失败处理规则
 
@@ -351,3 +352,51 @@ zelux:x:1001:
 3. 接 IMU 但不接舵机，跑 T05、T06、T07（纯数据链路，不涉及运动安全）；
 4. 接舵机后按 T01 → T02 → T03 → T04 → T09 → T10 顺序执行，T10 涉及总线独占，放最后。
 
+
+## 9. 本轮执行证据（2026-11-15 22:45–22:51，GMT+8）
+
+### 9.1 前置条件与测试边界
+
+- 真实 robotd 为 inactive/disabled，这是此前 UART2 初始化后保留的安全状态，本轮没有恢复它。
+- Agent、风扇服务 active。配置位于 /etc/robot/robotd.toml（不是旧记录中的 /etc/robotd）。source=ipc，socket=/run/zelux/robotd-imu.sock，max_age_ms=100。
+- /dev/ttyS2 已存在，root:zelux 0660。测试结束 fuser 无占用，pgrep 无 robotd 测试残留进程。
+- Agent 本次启动日志：没找到 IMU（i2c-3 上没有 0x6B/0x68/0x69/0x6A 应答，IIO 也没有）。这是当前驱动未探测到，不等于电气检查证明物理硬件不存在。
+- 同一启动周期的 22:40–22:42 Studio 日志报告接管 15/15 在线后交还；本轮没有重新扫描或动作。
+- --fake 强制使用合成 embedded IMU，不创建真实 IPC IMU 接收端。因此其结果仅用于通用 daemon socket/锁，不冒充 T05–T07。
+- 未上力、HOME、运动或真实 embedded 切换；未改变生产配置、永久权限或服务启用状态。创建并清理了隔离临时测试目录；compileall 产生 Python 字节码缓存。
+
+### 9.2 第 3 节自动化测试
+
+目标板 venv 未安装 pytest/jsonschema，直接执行要求的命令返回 No module named pytest/jsonschema。未安装额外依赖；改用标准库直接调用无 fixture 的原测试函数，并运行原 unittest 模块。以下不是 pytest 命令执行成功的记录：
+
+| 检查 | 结果 |
+|---|---|
+| 已部署 test_imu_publish 的 3 个原函数 | 3/3 通过 |
+| 已部署 test_hal_selection 原 unittest | 1 通过，2 失败 |
+| 本机 test_imu_contract.py 原函数在目标板执行 | 2/2 通过，调用已部署 Drivers |
+| 本机 test_catalog.py 原函数在目标板执行 | 3/3 通过，调用已部署 Drivers |
+| 目标板 compileall -q 已部署 zeluxd | rc=0 |
+| 本机协议 tools/validate.py | 6 个 JSON 文件基础解析通过；该工具不是完整 Schema 校验器 |
+| 完整 JSON Schema 示例校验 | 阻塞，目标板缺 jsonschema；JSON 解析不能代替 Schema 验收 |
+| Rust fmt / duck-control、robotd-params、robotd cargo test | 未执行，目标板无 cargo/rustc，本机无可用 WSL Rust 环境 |
+
+HAL 失败断言：期望 zelux.tof.custom，得到 zelux.tof.st-vl53l5cx；期望“启动失败”，实际是“构造失败：未知驱动 zelux.tof.broken”。这是注入工厂与独立 catalog 的集成回归失败，不能外推为所有已注册 IMU 型号都无法切换。T04 实际切换仍未执行。
+
+### 9.3 隔离验证方法和结果
+
+使用设备现有 /usr/local/bin/robotd（0.14.1），由 microduck 运行 --fake --no-policy，指定新建临时目录下的独立 --socket，不访问 /dev/ttyS2。完成后退出测试进程并清理目录。
+
+- T08.1：同端点第二个进程退出 1，日志 another robotd owns this socket。
+- T08.2：端点预置普通文件 preserve-me，进程退出 1，日志 refusing to bind over it；内容未变。
+- T08.3：预置已关闭的 Unix stream socket，fake daemon 成功重新监听。只证明控制 socket 恢复，不证明 datagram IMU socket。
+- T10 锁分支：fake daemon 持同一端点锁时，init 退出 1，日志 another robotd owns this socket；还指定了不存在的串口，避免失败时触达真实总线。没有执行无人持锁的 init。
+- T06 发布侧：两次独立 Python 子进程以 zelux 运行已部署 ImuPublisher，使用明确标记 SYNTHETIC 的合成 HAL，向隔离 Python 接收器各发送 15 帧；两次 publisher_id 不同，每次 sequence 都是 0–14。未向生产 socket 注入数据。
+- T09 权限旁证：隔离目录 root:robot 0750，datagram socket root:robot 0660；zelux 发布成功；nobody 发送失败，PermissionError errno 13。未放宽为 0777，生产 socket 不存在，不能替代实际部署验收。
+
+首次 T08 fixture 由 root 创建且未给 microduck 写目录权限，实例 bind 前 Permission denied；修正临时目录属主后重跑通过。这是测试夹具问题，未修改产品代码。原始输出见同目录 imu-decoupling-validation-20261115-evidence.md。
+
+### 9.4 结束状态与后续前提
+
+Agent/风扇 active；robotd inactive/disabled；真实 IMU socket 不存在；/run/zelux 为 root:zelux 0750。二进制 SHA-256：df54a2f62c08f4209433b1a7602dd29428adabbaa463cc161193677c87e725b4。版本号/哈希不证明其包含本机尚未提交的 Rust 修改。
+
+下一轮先恢复有效物理 IMU 读数，确认 robotd 与 Feetech 协议配置一致、总线独占、现场支撑与断电看护；再执行真实 T01/T02、T05–T07、生产 socket 的 T09。T03 需旧 ID 200 硬件；T10 停机动作分支需满足动作安全条件。按本执行单要求，本轮不修改产品实现来修绿结果。
