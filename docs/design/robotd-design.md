@@ -713,6 +713,8 @@ robot.
 |---|---|
 | `robot.health` | **the loop is meeting its deadline** — from achieved rate and missed-deadline count — plus a description of the robot the verdict never consults: loop, bus, IMU, battery, servo and board temperature |
 | `robot.safeToRestart` | false while the policy is enabled and the robot is moving |
+| `robot.imu.configure` | persist an allow-listed IMU model/calibration change through robotd's locked config writer; does not restart |
+| `robot.imu.restart` | apply pending verified IMU settings only after explicit confirmation, matching config revision and `safeToRestart`; robotd queues only its own systemd unit restart |
 | `robot.modelApi` | constant |
 | `robot.remoteSessionActive` | `false` — `mediad` owns the real answer |
 
@@ -740,6 +742,13 @@ distinguishes a loop being woken late from a loop doing too much, and those have
 
 `safeToRestart` is false while the policy is enabled and the robot is moving: restarting motor
 control mid-stride is how a robot falls over (`updater-design.md` §7.2).
+
+The Device Agent is intentionally not allowed to manage systemd: it runs as zelux with
+NoNewPrivileges and a read-only system view. IMU configuration writes and its narrowly scoped
+apply/restart request therefore go through robotd's local socket, whose owner is root. The restart
+request revalidates the on-disk revision, the selected supported model, and safeToRestart before
+queueing systemctl --no-block restart robotd.service; the Agent then waits for a different process
+identity and matching running revision. An accepted systemd job alone is not reported as applied.
 
 ### 3.5 Maintenance is a separate namespace
 

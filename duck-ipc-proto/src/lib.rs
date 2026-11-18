@@ -359,7 +359,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// playground did.
 /// v32: robot.health includes the process-start IMU identity and configuration revision.
 /// v33: robot.imu.configure writes IMU model/calibration through robotd's privileged config writer.
-pub const API_VERSION: u32 = 33;
+/// v34: robot.imu.restart requests a safety-gated robotd restart through the root daemon.
+pub const API_VERSION: u32 = 34;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -510,6 +511,8 @@ pub mod method {
     pub const ROBOT_HEALTH: &str = "robot.health";
     /// Change the selected IMU model or mounting correction through robotd.
     pub const ROBOT_CONFIGURE_IMU: &str = "robot.imu.configure";
+    /// Request a safety-checked restart of robotd to apply saved IMU settings.
+    pub const ROBOT_RESTART_IMU: &str = "robot.imu.restart";
     /// Which model API version does this build implement?
     pub const ROBOT_MODEL_API: &str = "robot.modelApi";
     /// Is a telepresence session live?
@@ -922,6 +925,8 @@ pub enum Call {
     RobotHealth,
     /// Change the persistent IMU model or mounting correction. Does not restart robotd.
     RobotConfigureImu(ImuConfigParams),
+    /// Restart robotd to apply saved IMU settings.
+    RobotRestartImu(ImuRestartParams),
     RobotModelApi,
     RobotRemoteSessionActive,
 
@@ -1113,6 +1118,7 @@ impl Call {
             Call::RobotSafeToRestart => method::ROBOT_SAFE_TO_RESTART,
             Call::RobotHealth => method::ROBOT_HEALTH,
             Call::RobotConfigureImu(_) => method::ROBOT_CONFIGURE_IMU,
+            Call::RobotRestartImu(_) => method::ROBOT_RESTART_IMU,
             Call::RobotModelApi => method::ROBOT_MODEL_API,
             Call::RobotRemoteSessionActive => method::ROBOT_SESSION_ACTIVE,
             Call::RobotMove(_) => method::ROBOT_MOVE,
@@ -1198,6 +1204,7 @@ impl Call {
                 | Call::RobotShutdown
                 // Persistent IMU configuration; the caller still has to request a safe restart.
                 | Call::RobotConfigureImu(_)
+                | Call::RobotRestartImu(_)
                 // Bonding a pad to this robot changes what may drive it, which is the most
                 // consequential thing in this namespace — a paired pad can enable the policy.
                 // `pad.status` is a read and stays ungated.
@@ -1294,6 +1301,7 @@ impl Call {
             Call::RobotSafeToRestart
             | Call::RobotHealth
             | Call::RobotConfigureImu(_)
+            | Call::RobotRestartImu(_)
             | Call::RobotModelApi
             | Call::RobotRemoteSessionActive
             | Call::RobotPolicies
@@ -1446,6 +1454,7 @@ impl Call {
             Call::RobotSetSkill(p) => encode(p),
             Call::RobotRemoveSkill(p) => encode(p),
             Call::RobotConfigureImu(p) => encode(p),
+            Call::RobotRestartImu(p) => encode(p),
             Call::Status
             | Call::Subscribe
             | Call::RobotSafeToRestart
@@ -1507,6 +1516,7 @@ impl Call {
             method::ROBOT_SAFE_TO_RESTART => Call::RobotSafeToRestart,
             method::ROBOT_HEALTH => Call::RobotHealth,
             method::ROBOT_CONFIGURE_IMU => Call::RobotConfigureImu(decode(params)?),
+            method::ROBOT_RESTART_IMU => Call::RobotRestartImu(decode(params)?),
             method::ROBOT_MODEL_API => Call::RobotModelApi,
             method::ROBOT_SESSION_ACTIVE => Call::RobotRemoteSessionActive,
             method::ROBOT_MOVE => Call::RobotMove(decode(params)?),
@@ -1648,6 +1658,10 @@ pub mod test_support {
                 model: Some("qingmu-a1".into()),
                 mount_correction_wxyz: None,
                 expected: "revision".into(),
+            }),
+            Call::RobotRestartImu(ImuRestartParams {
+                expected: "revision".into(),
+                confirmed: true,
             }),
             Call::RobotModelApi,
             Call::RobotRemoteSessionActive,
@@ -3276,6 +3290,14 @@ pub struct ImuConfigParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_correction_wxyz: Option<[f64; 4]>,
     pub expected: String,
+}
+
+/// Explicit, revision-checked request to apply saved IMU settings by restarting robotd.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImuRestartParams {
+    pub expected: String,
+    pub confirmed: bool,
 }
 
 /// Answer to [`Call::RobotHealth`].
@@ -5484,6 +5506,7 @@ mod tests {
                 method::SELECT,
                 method::PIN,
                 method::ROBOT_CONFIGURE_IMU,
+                method::ROBOT_RESTART_IMU,
                 // Powering the machine off is as consequential as rebooting it.
                 method::ROBOT_SHUTDOWN,
                 // Replacing the policy set is at least as consequential as bonding a pad: it

@@ -4322,6 +4322,59 @@ fn configure_imu_request(p: &proto::ImuConfigParams, state: &RobotState) -> serd
     configure_imu_file(&state.config_path, p)
 }
 
+fn restart_imu_request(p: &proto::ImuRestartParams, state: &RobotState) -> serde_json::Value {
+    let refused = |reason: String| serde_json::json!({"accepted": false, "reason": reason});
+    if !p.confirmed {
+        return refused("operator confirmation is required".into());
+    }
+    if state.imu_simulated.load(Ordering::Relaxed) {
+        return refused("simulated robotd cannot restart hardware services".into());
+    }
+    let safe = state.safe_to_restart();
+    if !safe.safe {
+        return refused(
+            safe.reason
+                .unwrap_or_else(|| "robotd is not safe to restart".into()),
+        );
+    }
+    let params = match params::Params::load(&state.config_path, false) {
+        Ok(params) => params,
+        Err(error) => {
+            return refused(format!(
+                "cannot validate current IMU configuration: {error}"
+            ));
+        }
+    };
+    if params::imu_management::revision(params.bus.protocol, &params.bus.imu) != p.expected {
+        return refused("IMU configuration changed; refresh before restarting".into());
+    }
+    if state.imu_runtime.revision == p.expected {
+        return refused("there are no pending IMU settings to apply".into());
+    }
+    if params.bus.imu.source != params::ImuSourceKind::ImuDxl
+        || params.bus.imu.model != Some(params::ImuModel::QingmuA1)
+        || params.bus.imu.resolve_mount(params.bus.protocol).is_err()
+    {
+        return refused("the selected IMU model is not verified and compatible".into());
+    }
+    // This process is the root-owned service manager for the control loop. Keep the privileged
+    // operation fixed to robotd.service and defer it until the IPC acknowledgement is flushed.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(300));
+        match std::process::Command::new("systemctl")
+            .args(["--no-block", "restart", "robotd.service"])
+            .status()
+        {
+            Ok(status) if status.success() => {
+                tracing::info!("scheduled robotd restart to apply IMU configuration")
+            }
+            Ok(status) => tracing::error!(?status, "systemd refused scheduled robotd restart"),
+            Err(error) => tracing::error!(%error, "cannot request robotd restart from systemd"),
+        }
+    });
+    serde_json::json!({"accepted": true})
+}
+
 fn configure_imu_file(path: &std::path::Path, p: &proto::ImuConfigParams) -> serde_json::Value {
     let refused = |reason: String| serde_json::json!({"accepted": false, "reason": reason});
     if std::fs::canonicalize(&p.config_path).ok() != std::fs::canonicalize(path).ok()
@@ -4865,6 +4918,10 @@ fn dispatch(
             let result = configure_imu_request(params, state);
             proto::Response::ok(Some(id), &result)
         }
+        proto::Call::RobotRestartImu(params) => {
+            let result = restart_imu_request(params, state);
+            proto::Response::ok(Some(id), &result)
+        }
         proto::Call::RobotSafeToRestart => proto::Response::ok(Some(id), &state.safe_to_restart()),
         proto::Call::RobotModelApi => proto::Response::ok(
             Some(id),
@@ -5108,6 +5165,59 @@ mod tests {
         let params = Params::load(&path, true).expect("valid config");
         let state = Arc::new(RobotState::new(&params, &path, false, false));
         (dir, state)
+    }
+
+    #[test]
+    fn imu_restart_rejects_missing_confirmation_stale_config_and_walking_state() {
+        let mut params = Params::default();
+        params.bus.protocol = params::BusProtocol::FeetechSts;
+        params.bus.imu.source = params::ImuSourceKind::ImuDxl;
+        params.bus.imu.model = Some(params::ImuModel::QingmuA1);
+        let text = toml::to_string(&params).unwrap();
+        let (_dir, state) = state_over(&text);
+        let current = params::imu_management::revision(params.bus.protocol, &params.bus.imu);
+        assert_eq!(
+            restart_imu_request(
+                &proto::ImuRestartParams {
+                    expected: current.clone(),
+                    confirmed: false,
+                },
+                &state
+            )["accepted"],
+            false
+        );
+        assert_eq!(
+            restart_imu_request(
+                &proto::ImuRestartParams {
+                    expected: "stale".into(),
+                    confirmed: true,
+                },
+                &state
+            )["accepted"],
+            false
+        );
+        assert_eq!(
+            restart_imu_request(
+                &proto::ImuRestartParams {
+                    expected: current.clone(),
+                    confirmed: true,
+                },
+                &state
+            )["accepted"],
+            false,
+            "a restart without pending settings is refused"
+        );
+        state.moving.store(true, Ordering::Relaxed);
+        assert_eq!(
+            restart_imu_request(
+                &proto::ImuRestartParams {
+                    expected: current,
+                    confirmed: true,
+                },
+                &state
+            )["accepted"],
+            false
+        );
     }
 
     /// **A new skill needs a duration and an existing one does not**, so a client may send one

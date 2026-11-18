@@ -26,6 +26,20 @@ Agent 过去直接执行 robotctl imu-config 本地写入模式。Agent 的 syst
 - BLE/WebRTC 不开放此方法，Agent 通过已有受权限保护的本机 socket 调用。
 - 失败不回退到 Agent 本地写文件。robotd 不在线或版本不匹配时应明确失败。
 
+## 2.1 IMU 重启按钮报 Access denied 的根因和修复
+
+Studio 原本已有“重启 robotd 生效”按钮；报错不是缺少按钮，而是 Agent 直接调用 systemctl restart robotd.service。zeluxd 运行于 User=zelux、NoNewPrivileges=yes 沙箱，系统没有授权它管理 robotd 单元，因此 systemd 返回 Access denied。不能给 Agent root、sudo 或宽泛 systemd 权限。
+
+新调用链：Studio 的明确安全确认 → Device Agent → robotctl → robotd 的 robot.imu.restart（IPC API 34）→ 固定的 systemctl --no-block restart robotd.service。由 root robotd 在确认响应发出后排队执行。
+
+robotd 在接受请求前重查：操作者确认、真实而非模拟进程、实时 safeToRestart、保存配置修订仍匹配，以及 qingmu-a1 驱动/总线配置已验证兼容。运行中步态或旧页面配置不能触发重启。该 IPC 仅限本机 robotd socket，BLE 和 WebRTC 明确拒绝此方法。
+
+Agent 请求后轮询 robotd，只有观察到不同进程实例且运行修订与磁盘配置一致，才报告“已应用”；systemd 接受请求不等于新进程健康。失败时 Studio 显示具体错误或“尚未确认”，不会伪报成功。
+
+## 2.2 配套部署
+
+修复只需更新 robotd 发布包（内含 robotctl）和 Device Agent；Studio 按钮及页面无需变更。Robotd/robotctl 现在是 IPC API 34，应从同一个 daemon 构建部署。Device Agent 不再直接执行 systemctl 管理 robotd。
+
 qingmu-a1 继续使用飞特协议及其现有安装/机体对齐逻辑；不借此次修复改变坐标系。qingmu-b1 仍维持未验证状态，不能冒充可用驱动。
 
 ## 3. Windows 换行与打包
@@ -52,7 +66,7 @@ robotd 的发布归档器对带 shebang 的文本入口（含生成的 hook）�
 
 ## 5. 需要部署什么
 
-1. 同一新构建中的 robotd 与 robotctl（API 33）；不要只换其中一个。完整 daemon 发布应同时携带重新构建的服务端组件。
+1. 同一新构建中的 robotd 与 robotctl（API 34）；不要只换其中一个。完整 daemon 发布应同时携带重新构建的服务端组件。
 2. 更新 Device Agent 的 robotd_imu 桥接代码，以传递正确 socket 参数。
 3. 重新生成 Device Image/安装包，使新启动脚本格式检查生效。
 4. 设备修复 ONNX Runtime 后，单独确认策略健康。仅 git pull 不等于重新构建、安装或进程已更新。
@@ -61,9 +75,10 @@ robotd 的发布归档器对带 shebang 的文本入口（含生成的 hook）�
 
 ## 6. 验证记录和限制
 
-- Device Agent：134 项 Python 单元测试通过，包括型号/标定保存传递指定 socket、保存后待重启且不自动重启。
+- Device Agent：135 项 Python 单元测试通过，包括型号/标定保存及重启都传递 robotd socket，且保存不会自动重启。
 - robotd 与 robotctl：aarch64-unknown-linux-gnu cargo check 通过。
 - 协议测试与 robotctl IMU 集成测试：aarch64 目标编译检查通过，尚未在 Linux 执行。
+- Robotd 重启请求拒绝未确认、无待应用改动、过期修订、模拟进程和正在行走状态；Robotctl 集成测试验证请求中的确认和修订字段。完整 Rust 测试尚未在 Linux 执行。
 - 部署脚本逐文件 bash -n 通过；Device Image 的 LF/BOM 检查（24 文件）和组件锁验证通过。
 - 新增 robotd 配置写入测试覆盖保存、过期修订拒绝、错误路径及二选一校验；新增归档脚本换行/二进制不变测试。
 - 本机 Windows 无 Linux 测试运行环境；完整 Rust 测试仍待 Linux CI/构建机执行。robotd/xtask 测试交叉构建还受缺少 aarch64-linux-gnu-gcc 限制，btd/mediad 全量构建受 GLib 交叉 sysroot 限制。不能将 cargo check 记为设备测试通过。

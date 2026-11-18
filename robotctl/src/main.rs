@@ -125,6 +125,10 @@ struct Cli {
 enum Namespace {
     /// JSON IMU catalog/configuration. Saving never restarts the daemon.
     ImuStatus,
+    ImuRestart {
+        #[arg(long, required = true)]
+        expected: String,
+    },
     ImuConfig {
         #[arg(long, default_value = robotd_params::DEFAULT_PATH)]
         file: PathBuf,
@@ -4618,6 +4622,10 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }
         Namespace::ImuStatus => {
             return imu_config::status(&cli.robot_socket);
+        }
+        Namespace::ImuRestart { expected } => {
+            return imu_config::restart(&cli.robot_socket, &expected)
+                .map_err(|e| Failure::new(exit::FAILED, e));
         }
         Namespace::ImuConfig {
             file,

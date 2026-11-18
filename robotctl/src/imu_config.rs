@@ -1,5 +1,29 @@
 //! IMU management endpoint for Studio/Agent. JSON only, never starts robotd.
 use std::path::Path;
+
+pub fn restart(socket: &Path, expected: &str) -> Result<(), String> {
+    let mut client = crate::Client::connect_to("robotd", socket).map_err(|e| e.message)?;
+    client.hello().map_err(|e| e.message)?;
+    let call = duck_ipc_proto::Call::RobotRestartImu(duck_ipc_proto::ImuRestartParams {
+        expected: expected.to_owned(),
+        confirmed: true,
+    });
+    let result =
+        crate::result_of(client.call(&call).map_err(|e| e.message)?).map_err(|e| e.message)?;
+    if result.get("accepted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(result
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("robotd refused the restart request")
+            .to_owned());
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&result).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 pub fn status(socket: &Path) -> Result<(), crate::Failure> {
     let mut client = crate::Client::connect_to("robotd", socket)?;
     let health: duck_ipc_proto::HealthResult = client
