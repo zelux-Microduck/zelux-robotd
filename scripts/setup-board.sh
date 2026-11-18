@@ -12,6 +12,7 @@
 #   sudo sh setup-board.sh
 #   sudo reboot                     # only if it asks
 #   sudo /usr/local/sbin/robot-setup-board
+#   sudo sh scripts/setup-board.sh --onnxruntime-only  # repair policy runtime only
 #
 # The first run copies itself to that path. /tmp does not survive a reboot, and a script
 # whose whole job is "change boot config, reboot, confirm" that then deletes itself across
@@ -1100,6 +1101,30 @@ EOF
 }
 
 main() {
+    # Repair a missing inference dependency without changing boot overlays, networking,
+    # Bluetooth, audio, serial ownership, robot configuration or running services.
+    if [ "${1:-}" = "--onnxruntime-only" ]; then
+        [ "$#" -eq 1 ] || die "--onnxruntime-only accepts no additional arguments"
+        [ "$(id -u)" -eq 0 ] || die "run as root to install ONNX Runtime"
+        [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] \
+            || die "ONNX Runtime installation requires aarch64 Linux"
+        for tool in curl tar install readlink python3; do
+            command -v "$tool" >/dev/null 2>&1 || die "missing prerequisite: $tool"
+        done
+        mkdir -p "$ONNX_LIB_DIR"
+        install_onnxruntime
+        if command -v ldconfig >/dev/null 2>&1; then
+            ldconfig
+        elif [ -x /usr/sbin/ldconfig ]; then
+            /usr/sbin/ldconfig
+        else
+            die "ldconfig is required to register the ONNX Runtime library"
+        fi
+        python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1]); ctypes.CDLL("libonnxruntime.so"); print("ONNX Runtime library load: OK")' \
+            "$ONNX_LIB_DIR/libonnxruntime.so" || die "installed runtime cannot be loaded"
+        say "runtime repaired; restart robotd only after mechanically supporting the robot"
+        return 0
+    fi
     check_environment
     persist_self
     configure_overlay

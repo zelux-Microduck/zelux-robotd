@@ -358,8 +358,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// standing duck down every other press — or asks somebody to reach for the pad, which is what the
 /// playground did.
 /// v32: robot.health includes the process-start IMU identity and configuration revision.
-/// Install robotd and robotctl from the same release to enable Studio IMU management.
-pub const API_VERSION: u32 = 32;
+/// v33: robot.imu.configure writes IMU model/calibration through robotd's privileged config writer.
+pub const API_VERSION: u32 = 33;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -508,6 +508,8 @@ pub mod method {
     pub const ROBOT_SAFE_TO_RESTART: &str = "robot.safeToRestart";
     /// Did the robot come up correctly? The post-update health gate.
     pub const ROBOT_HEALTH: &str = "robot.health";
+    /// Change the selected IMU model or mounting correction through robotd.
+    pub const ROBOT_CONFIGURE_IMU: &str = "robot.imu.configure";
     /// Which model API version does this build implement?
     pub const ROBOT_MODEL_API: &str = "robot.modelApi";
     /// Is a telepresence session live?
@@ -918,6 +920,8 @@ pub enum Call {
     // ── robot.* ──────────────────────────────────────────────────────────────
     RobotSafeToRestart,
     RobotHealth,
+    /// Change the persistent IMU model or mounting correction. Does not restart robotd.
+    RobotConfigureImu(ImuConfigParams),
     RobotModelApi,
     RobotRemoteSessionActive,
 
@@ -1108,6 +1112,7 @@ impl Call {
             Call::Subscribe => method::SUBSCRIBE,
             Call::RobotSafeToRestart => method::ROBOT_SAFE_TO_RESTART,
             Call::RobotHealth => method::ROBOT_HEALTH,
+            Call::RobotConfigureImu(_) => method::ROBOT_CONFIGURE_IMU,
             Call::RobotModelApi => method::ROBOT_MODEL_API,
             Call::RobotRemoteSessionActive => method::ROBOT_SESSION_ACTIVE,
             Call::RobotMove(_) => method::ROBOT_MOVE,
@@ -1191,6 +1196,8 @@ impl Call {
                 | Call::SystemSetPairingPin(_)
                 // Powering the machine off is at least as disruptive as rebooting it.
                 | Call::RobotShutdown
+                // Persistent IMU configuration; the caller still has to request a safe restart.
+                | Call::RobotConfigureImu(_)
                 // Bonding a pad to this robot changes what may drive it, which is the most
                 // consequential thing in this namespace — a paired pad can enable the policy.
                 // `pad.status` is a read and stays ungated.
@@ -1286,6 +1293,7 @@ impl Call {
             // ── robotd ──────────────────────────────────────────────────────
             Call::RobotSafeToRestart
             | Call::RobotHealth
+            | Call::RobotConfigureImu(_)
             | Call::RobotModelApi
             | Call::RobotRemoteSessionActive
             | Call::RobotPolicies
@@ -1437,6 +1445,7 @@ impl Call {
             Call::PadBind(p) => encode(p),
             Call::RobotSetSkill(p) => encode(p),
             Call::RobotRemoveSkill(p) => encode(p),
+            Call::RobotConfigureImu(p) => encode(p),
             Call::Status
             | Call::Subscribe
             | Call::RobotSafeToRestart
@@ -1497,6 +1506,7 @@ impl Call {
             method::SUBSCRIBE => Call::Subscribe,
             method::ROBOT_SAFE_TO_RESTART => Call::RobotSafeToRestart,
             method::ROBOT_HEALTH => Call::RobotHealth,
+            method::ROBOT_CONFIGURE_IMU => Call::RobotConfigureImu(decode(params)?),
             method::ROBOT_MODEL_API => Call::RobotModelApi,
             method::ROBOT_SESSION_ACTIVE => Call::RobotRemoteSessionActive,
             method::ROBOT_MOVE => Call::RobotMove(decode(params)?),
@@ -1633,6 +1643,12 @@ pub mod test_support {
             Call::Subscribe,
             Call::RobotSafeToRestart,
             Call::RobotHealth,
+            Call::RobotConfigureImu(ImuConfigParams {
+                config_path: "/etc/robot/robotd.toml".into(),
+                model: Some("qingmu-a1".into()),
+                mount_correction_wxyz: None,
+                expected: "revision".into(),
+            }),
             Call::RobotModelApi,
             Call::RobotRemoteSessionActive,
             Call::RobotMove(MoveParams {
@@ -3245,6 +3261,21 @@ pub struct SafeToRestartResult {
     /// Why not, when `safe` is false. Displayable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Persistent IMU configuration written by `robotd`, which owns `/etc/robot/robotd.toml`.
+/// Exactly one of `model` and `mount_correction_wxyz` must be provided; `expected` is the
+/// revision returned by `robotctl imu-config` and prevents stale Studio edits from winning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImuConfigParams {
+    /// Must identify the file robotd already owns; never used to choose a write target.
+    pub config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_correction_wxyz: Option<[f64; 4]>,
+    pub expected: String,
 }
 
 /// Answer to [`Call::RobotHealth`].
@@ -5452,6 +5483,7 @@ mod tests {
                 method::RESET_TO_GOLDEN,
                 method::SELECT,
                 method::PIN,
+                method::ROBOT_CONFIGURE_IMU,
                 // Powering the machine off is as consequential as rebooting it.
                 method::ROBOT_SHUTDOWN,
                 // Replacing the policy set is at least as consequential as bonding a pad: it

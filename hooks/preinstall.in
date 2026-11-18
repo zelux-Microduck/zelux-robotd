@@ -44,6 +44,7 @@ die() { printf 'preinstall: %s\n' "$*" >&2; exit 1; }
 # resolved target names the version without running anything. Asking the library itself would
 # mean dlopening it, which is what we are trying to avoid doing unsafely.
 installed_onnx() {
+    [ -e "${ONNX_LIB_DIR}/libonnxruntime.so" ] || return 0
     resolved="$(readlink -f "${ONNX_LIB_DIR}/libonnxruntime.so" 2>/dev/null || true)"
     case "$resolved" in
         */libonnxruntime.so.*) printf '%s' "${resolved##*/libonnxruntime.so.}" ;;
@@ -107,6 +108,7 @@ install_onnx() {
     found="$(find "$tmp" -name 'libonnxruntime.so.*' -type f | head -1)"
     [ -n "$found" ] || die "no libonnxruntime.so.* in the ONNX Runtime tarball"
 
+    mkdir -p "$ONNX_LIB_DIR"
     install -m 0644 "$found" "${ONNX_LIB_DIR}/$(basename "$found")"
     ln -sf "$(basename "$found")" "${ONNX_LIB_DIR}/libonnxruntime.so"
 

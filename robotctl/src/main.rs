@@ -4626,12 +4626,13 @@ fn run(cli: Cli) -> Result<(), Failure> {
             expected,
         } => {
             return imu_config::run(
+                &cli.robot_socket,
                 &file,
                 model.as_deref(),
                 mount_correction_wxyz.as_deref(),
                 expected.as_deref(),
             )
-                .map_err(|e| Failure::new(exit::FAILED, e));
+            .map_err(|e| Failure::new(exit::FAILED, e));
         }
         Namespace::Configure { file, list, json } => {
             let result = if list {

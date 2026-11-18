@@ -281,7 +281,9 @@ fn permits(call: &proto::Call) -> bool {
         //
         // `updaterd`'s private queries to `robotd`. Internal plumbing of the update decision, of
         // no use to a client and misleading if exposed.
-        RobotSafeToRestart | RobotModelApi | RobotRemoteSessionActive => false,
+        RobotSafeToRestart | RobotModelApi | RobotRemoteSessionActive | RobotConfigureImu(_) => {
+            false
+        }
 
         // ── refused: this transport does not authenticate ────────────────────
         //

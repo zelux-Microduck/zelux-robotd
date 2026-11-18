@@ -4313,6 +4313,154 @@ fn queue_skill(state: &RobotState, intents: &Intents, skill: &str) -> bool {
     }
 }
 
+/// Handle Studio's persistent IMU edits here, under robotd's existing write permissions.
+/// The Agent deliberately has a read-only filesystem view of /etc/robot.
+fn configure_imu_request(p: &proto::ImuConfigParams, state: &RobotState) -> serde_json::Value {
+    if state.imu_simulated.load(Ordering::Relaxed) {
+        return serde_json::json!({"accepted": false, "reason": "simulated robotd cannot edit hardware IMU configuration"});
+    }
+    configure_imu_file(&state.config_path, p)
+}
+
+fn configure_imu_file(path: &std::path::Path, p: &proto::ImuConfigParams) -> serde_json::Value {
+    let refused = |reason: String| serde_json::json!({"accepted": false, "reason": reason});
+    if std::fs::canonicalize(&p.config_path).ok() != std::fs::canonicalize(path).ok()
+        || std::fs::canonicalize(path).is_err()
+    {
+        return refused(
+            "requested configuration path does not match robotd's configuration".into(),
+        );
+    }
+    if p.model.is_some() == p.mount_correction_wxyz.is_some() {
+        return refused("provide exactly one IMU model or mounting correction".into());
+    }
+
+    let result = if let Some(model) = p.model.as_deref() {
+        let model = match model {
+            "qingmu-a1" => params::ImuModel::QingmuA1,
+            "qingmu-b1" => params::ImuModel::QingmuB1,
+            _ => return refused(format!("unknown IMU model {model:?}")),
+        };
+        params::edit::select_imu_model(path, model, &p.expected)
+    } else {
+        params::edit::set_imu_mount_correction(
+            path,
+            p.mount_correction_wxyz
+                .expect("one operation was validated"),
+            &p.expected,
+        )
+    };
+    if let Err(reason) = result {
+        return refused(reason);
+    }
+
+    let parsed = match params::Params::load(path, false) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return refused(format!(
+                "configuration was saved but could not be re-read: {error}"
+            ));
+        }
+    };
+    let mut management = params::imu_management::snapshot(&parsed);
+    management["config_path"] =
+        serde_json::json!(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
+    serde_json::json!({"accepted": true, "management": management})
+}
+
+#[cfg(test)]
+mod imu_config_tests {
+    use super::*;
+
+    fn config_file(path: &std::path::Path) {
+        let mut config = params::Params::default();
+        config.bus.protocol = params::BusProtocol::FeetechSts;
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn model_change_is_written_by_robotd_and_returns_the_new_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        config_file(&path);
+        let before = params::Params::load(&path, false).unwrap();
+        let expected = params::imu_management::revision(before.bus.protocol, &before.bus.imu);
+        let result = configure_imu_file(
+            &path,
+            &proto::ImuConfigParams {
+                config_path: path.to_string_lossy().into_owned(),
+                model: Some("qingmu-a1".into()),
+                mount_correction_wxyz: None,
+                expected,
+            },
+        );
+        assert_eq!(result["accepted"], true);
+        assert_eq!(result["management"]["config"]["imu"]["model"], "qingmu-a1");
+        assert_ne!(result["management"]["revision"], "");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("qingmu-a1")
+        );
+    }
+
+    #[test]
+    fn stale_revision_refuses_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        config_file(&path);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let result = configure_imu_file(
+            &path,
+            &proto::ImuConfigParams {
+                config_path: path.to_string_lossy().into_owned(),
+                model: Some("qingmu-a1".into()),
+                mount_correction_wxyz: None,
+                expected: "stale".into(),
+            },
+        );
+        assert_eq!(result["accepted"], false);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn calibration_is_saved_and_wrong_paths_or_ambiguous_edits_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        config_file(&path);
+        let before = params::Params::load(&path, false).unwrap();
+        params::edit::select_imu_model(
+            &path,
+            params::ImuModel::QingmuA1,
+            &params::imu_management::revision(before.bus.protocol, &before.bus.imu),
+        )
+        .unwrap();
+        let before = params::Params::load(&path, false).unwrap();
+        let mut request = proto::ImuConfigParams {
+            config_path: path.to_string_lossy().into_owned(),
+            model: None,
+            mount_correction_wxyz: Some([1.0, 0.0, 0.0, 0.0]),
+            expected: params::imu_management::revision(before.bus.protocol, &before.bus.imu),
+        };
+        let result = configure_imu_file(&path, &request);
+        assert_eq!(result["accepted"], true, "{result}");
+        assert_eq!(
+            result["management"]["config"]["imu"]["mount_correction_wxyz"],
+            serde_json::json!([1.0, 0.0, 0.0, 0.0])
+        );
+        let original = std::fs::read(&path).unwrap();
+        request.config_path = dir.path().join("other.toml").to_string_lossy().into_owned();
+        assert_eq!(configure_imu_file(&path, &request)["accepted"], false);
+        request.config_path = path.to_string_lossy().into_owned();
+        request.model = Some("qingmu-a1".into());
+        assert_eq!(configure_imu_file(&path, &request)["accepted"], false);
+        request.model = None;
+        request.mount_correction_wxyz = None;
+        assert_eq!(configure_imu_file(&path, &request)["accepted"], false);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+}
+
 fn dispatch(
     state: &RobotState,
     intents: &Intents,
@@ -4713,6 +4861,10 @@ fn dispatch(
         }
 
         proto::Call::RobotHealth => proto::Response::ok(Some(id), &state.health()),
+        proto::Call::RobotConfigureImu(params) => {
+            let result = configure_imu_request(params, state);
+            proto::Response::ok(Some(id), &result)
+        }
         proto::Call::RobotSafeToRestart => proto::Response::ok(Some(id), &state.safe_to_restart()),
         proto::Call::RobotModelApi => proto::Response::ok(
             Some(id),

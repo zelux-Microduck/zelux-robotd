@@ -824,6 +824,14 @@ fn append_bytes(
     bytes: &[u8],
     mode: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Includes generated hooks as well as checked-in scripts. Never alter ELF binaries.
+    let normalized;
+    let bytes = if bytes.starts_with(b"#!") {
+        normalized = std::str::from_utf8(bytes)?.replace("\r\n", "\n");
+        normalized.as_bytes()
+    } else {
+        bytes
+    };
     let mut header = tar::Header::new_gnu();
     header.set_size(bytes.len() as u64);
     header.set_mode(mode);
@@ -848,6 +856,39 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_payload_normalizes_scripts_but_preserves_binary_bytes() {
+        use std::io::Read;
+        let mut builder = tar::Builder::new(Vec::new());
+        super::append_bytes(
+            &mut builder,
+            "hooks/preinstall",
+            b"#!/bin/sh\r\necho OK\r\n",
+            0o755,
+        )
+        .unwrap();
+        super::append_bytes(&mut builder, "bin/robotd", b"\x7fELF\r\n\x00", 0o755).unwrap();
+        let archive = builder.into_inner().unwrap();
+        let mut archive = tar::Archive::new(archive.as_slice());
+        let mut entries = archive.entries().unwrap();
+        let mut script = Vec::new();
+        entries
+            .next()
+            .unwrap()
+            .unwrap()
+            .read_to_end(&mut script)
+            .unwrap();
+        assert_eq!(script, b"#!/bin/sh\necho OK\n");
+        let mut binary = Vec::new();
+        entries
+            .next()
+            .unwrap()
+            .unwrap()
+            .read_to_end(&mut binary)
+            .unwrap();
+        assert_eq!(binary, b"\x7fELF\r\n\x00");
+    }
+
     /// Every file that packages a release, which is where the `--include` list and the staged
     /// binaries live. Repository paths, because one of them is not a workflow.
     ///
